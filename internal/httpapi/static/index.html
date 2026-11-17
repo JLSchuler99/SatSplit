@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SatSplit</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-theme="dark">
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle theme">🌙</button>
+    <main class="page">
+      <header class="header">
+        <h1>SatSplit</h1>
+        <p>Split a shared receipt with a single Lightning address.</p>
+      </header>
+
+      <section id="view-upload" class="view">
+        <div class="card">
+          <h2>1. Upload Receipt</h2>
+          <form id="upload-form">
+            <label>
+              Lightning Address
+              <input name="lightning_address" type="text" placeholder="name@domain.com" required />
+            </label>
+            <label>
+              Currency
+              <select name="currency_code">
+                <option value="USD">USD — US Dollar</option>
+                <option value="EUR">EUR — Euro</option>
+                <option value="GBP">GBP — British Pound</option>
+                <option value="MXN">MXN — Mexican Peso</option>
+                <option value="DOP">DOP — Dominican Peso</option>
+                <option value="CAD">CAD — Canadian Dollar</option>
+                <option value="JPY">JPY — Japanese Yen</option>
+                <option value="BRL">BRL — Brazilian Real</option>
+                <option value="CHF">CHF — Swiss Franc</option>
+                <option value="AUD">AUD — Australian Dollar</option>
+                <option value="THB">THB — Thai Baht</option>
+                <option value="COP">COP — Colombian Peso</option>
+                <option value="HUF">HUF — Hungarian Forint</option>
+              </select>
+            </label>
+            <label id="ocr-lang-field" class="hidden">
+              OCR Language
+              <select name="ocr_lang">
+                <option value="">Default</option>
+                <option value="eng">English</option>
+                <option value="spa">Spanish</option>
+                <option value="fra">French</option>
+                <option value="deu">German</option>
+                <option value="hun">Hungarian</option>
+                <option value="por">Portuguese</option>
+                <option value="jpn">Japanese</option>
+                <option value="kor">Korean</option>
+                <option value="chi_sim">Chinese</option>
+                <option value="tha">Thai</option>
+              </select>
+            </label>
+            <div class="receipt-source">
+              <span class="receipt-source-title">Receipt Photo</span>
+              <div class="receipt-source-buttons">
+                <label class="file-button">
+                  Take photo
+                  <input id="receipt-camera" type="file" accept="image/*" capture="environment" hidden />
+                </label>
+                <label class="file-button file-button-secondary">
+                  Choose from gallery
+                  <input name="receipt" type="file" accept="image/*,.heic,.heif" hidden />
+                </label>
+              </div>
+              <span id="receipt-chosen" class="receipt-chosen">No photo selected</span>
+            </div>
+            <button type="submit">Continue</button>
+          </form>
+          <div id="upload-result" class="result hidden"></div>
+        </div>
+      </section>
+
+      <section id="view-crop" class="view hidden">
+        <div class="card">
+          <h2>2. Crop (Optional)</h2>
+          <p class="summary">Drag to crop the receipt before OCR. Tap “Skip” to use the full image.</p>
+          <div class="cropper" id="cropper">
+            <img id="crop-image" alt="Receipt to crop" />
+            <div id="crop-overlay" class="crop-overlay hidden"></div>
+          </div>
+          <div class="crop-actions">
+            <button id="crop-skip" type="button">Skip Crop</button>
+            <button id="crop-apply" type="button">Crop &amp; Upload</button>
+          </div>
+          <div id="crop-progress" class="crop-progress hidden" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <span id="crop-progress-text">Uploading…</span>
+          </div>
+          <div id="crop-error" class="result error hidden"></div>
+        </div>
+      </section>
+
+      <section id="view-review" class="view hidden">
+        <div class="card">
+          <h2>3. Review &amp; Edit</h2>
+          <p id="review-status" class="summary"></p>
+          <div id="review-panel" class="review">
+            <div class="review-media">
+              <img id="review-image" alt="Receipt preview" />
+            </div>
+            <div class="review-text">
+              <h3>OCR Text</h3>
+              <pre id="review-ocr"></pre>
+            </div>
+          </div>
+          <div id="edit-items">
+            <label>
+              Tip Percentage
+              <input id="tip-percent" type="text" inputmode="decimal" pattern="[0-9]*\.?[0-9]*" placeholder="0" value="0" />
+            </label>
+            <label>
+              Tax and service to split
+              <input id="tax-amount" type="text" inputmode="decimal" pattern="[0-9]*\.?[0-9]*" placeholder="0.00" value="0.00" />
+            </label>
+            <p class="summary">Sales tax, ITBIS, and service charges printed on the receipt. Each person pays the portion that matches what they ordered. Tip stays the percentage above.</p>
+            <div id="edit-list" class="items"></div>
+            <button id="add-item" type="button">Add Item</button>
+            <button id="save-items" type="button">Save &amp; Continue</button>
+            <div id="edit-result" class="result hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-share" class="view hidden">
+        <div class="card">
+          <h2>4. Share</h2>
+          <div id="share-panel"></div>
+          <button id="new-upload" type="button">Start New Receipt</button>
+        </div>
+      </section>
+
+      <section id="view-join" class="view hidden">
+        <div class="card">
+          <h2>Choose Your Items</h2>
+          <div id="receipt-summary" class="summary"></div>
+          <form id="selection-form">
+            <label>
+              Your Name
+              <input name="participant" type="text" placeholder="Alex" />
+            </label>
+            <div id="items" class="items"></div>
+            <div class="total">
+              <span>Subtotal</span>
+              <strong id="subtotal">$0.00</strong>
+            </div>
+            <div class="total hidden" id="guest-tax-row">
+              <span>Tax and service</span>
+              <strong id="guest-tax">$0.00</strong>
+            </div>
+            <div class="total">
+              <span>Total</span>
+              <strong id="guest-total">$0.00</strong>
+            </div>
+            <button type="submit">Generate Invoice</button>
+          </form>
+          <div id="selection-result" class="result hidden"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

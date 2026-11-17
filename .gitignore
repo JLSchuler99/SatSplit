@@ -1,0 +1,14 @@
+# Local data: the database and uploaded receipt photos are personal.
+*.db
+*.db-wal
+*.db-shm
+uploads/
+test-img/
+
+# Deployment files and secrets specific to one installation.
+k8s.yaml
+.env
+
+# Tooling
+.claude/
+.DS_Store
