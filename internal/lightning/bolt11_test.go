@@ -56,3 +56,18 @@ func TestIsPublicIP(t *testing.T) {
 		}
 	}
 }
+
+func TestInvoicePattern(t *testing.T) {
+	cases := map[string]bool{
+		"lnbc1pvjluezsp5zyg3zyg3": true,
+		"LNBC1PVJLUEZSP5ZYG3ZYG3": true,
+		`lnbc1"><img src=x>`:      false,
+		"lnbc1 pvjluez":           false,
+		"":                        false,
+	}
+	for in, want := range cases {
+		if got := invoicePattern.MatchString(in); got != want {
+			t.Errorf("invoicePattern(%q) = %v, want %v", in, got, want)
+		}
+	}
+}

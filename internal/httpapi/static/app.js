@@ -1052,19 +1052,45 @@ function renderSelectionResult(payload) {
   selectionResult.classList.remove("hidden");
   selectionResult.classList.remove("error");
   currentCurrency = payload.currency_code || currentCurrency;
-  selectionResult.innerHTML = `
-    <strong>${payload.already_paid_cents > 0 ? "Second invoice ready" : "Invoice ready"}</strong>
-    <div class="copy-row">
-      <input type="text" value="${payload.invoice}" readonly />
-      <button type="button" data-copy="${payload.invoice}">Copy</button>
-    </div>
-    <p>Subtotal: ${formatCents(payload.subtotal_cents)} · Tax and service ${formatCents(payload.tax_cents || 0)} · Tip ${payload.tip_percent || 0}% (${formatCents(payload.tip_cents || 0)})</p>
-    <p>Total: ${formatCents(payload.total_cents)}${
-      payload.already_paid_cents > 0
-        ? ` · already paid ${formatCents(payload.already_paid_cents)} · <strong>this second invoice: ${formatCents(payload.invoice_cents)}</strong>`
-        : ""
-    } · ${payload.amount_msat} msat</p>
-  `;
+  // Built with DOM calls, not innerHTML: the invoice text comes from the
+  // host's Lightning address provider and must never be parsed as HTML.
+  selectionResult.textContent = "";
+  const alreadyPaid = Number(payload.already_paid_cents) || 0;
+  const invoice = String(payload.invoice || "");
+
+  const heading = document.createElement("strong");
+  heading.textContent = alreadyPaid > 0 ? "Second invoice ready" : "Invoice ready";
+  selectionResult.appendChild(heading);
+
+  const copyRow = document.createElement("div");
+  copyRow.className = "copy-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.readOnly = true;
+  input.value = invoice;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("data-copy", invoice);
+  button.textContent = "Copy";
+  copyRow.appendChild(input);
+  copyRow.appendChild(button);
+  selectionResult.appendChild(copyRow);
+
+  const breakdown = document.createElement("p");
+  breakdown.textContent = `Subtotal: ${formatCents(payload.subtotal_cents)} \u00b7 Tax and service ${formatCents(payload.tax_cents || 0)} \u00b7 Tip ${Number(payload.tip_percent) || 0}% (${formatCents(payload.tip_cents || 0)})`;
+  selectionResult.appendChild(breakdown);
+
+  const total = document.createElement("p");
+  total.appendChild(document.createTextNode(`Total: ${formatCents(payload.total_cents)}`));
+  if (alreadyPaid > 0) {
+    total.appendChild(document.createTextNode(` \u00b7 already paid ${formatCents(alreadyPaid)} \u00b7 `));
+    const due = document.createElement("strong");
+    due.textContent = `this second invoice: ${formatCents(payload.invoice_cents)}`;
+    total.appendChild(due);
+  }
+  total.appendChild(document.createTextNode(` \u00b7 ${Number(payload.amount_msat) || 0} msat`));
+  selectionResult.appendChild(total);
+
   wireCopy(selectionResult);
 }
 

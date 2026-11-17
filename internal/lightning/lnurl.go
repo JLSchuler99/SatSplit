@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+var invoicePattern = regexp.MustCompile(`(?i)^ln[a-z0-9]+$`)
+
 var lightningAddressPattern = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
 
 type LNURLPayResponse struct {
@@ -220,7 +222,13 @@ func RequestInvoice(ctx context.Context, lnurl LNURLPayResponse, amountMSat int6
 	if pr == "" {
 		pr = payload.PaymentRequest
 	}
+	pr = strings.TrimSpace(pr)
 	if pr != "" {
+		// The invoice is shown in guests' browsers. Accept only the bech32
+		// form so a provider cannot pass markup or other text through.
+		if len(pr) > 8192 || !invoicePattern.MatchString(pr) {
+			return Invoice{}, errors.New("provider returned a malformed invoice")
+		}
 		return Invoice{PaymentRequest: pr, VerifyURL: cleanVerifyURL(payload.Verify)}, nil
 	}
 	return Invoice{}, errors.New("invoice not found")
