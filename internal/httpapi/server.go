@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,12 @@ import (
 
 const (
 	maxReceiptSize = 20 << 20 // 20 MB
+)
+
+// The LNURL calls go through these so tests can stand in for a provider.
+var (
+	fetchLNURLPay  = lightning.FetchLNURLPay
+	requestInvoice = lightning.RequestInvoice
 )
 
 type OCRService interface {
@@ -325,6 +332,10 @@ func (s *Server) handleReceiptRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleItemSplit(w, r, token, parts[2])
 		return
 	}
+	if len(parts) == 4 && parts[1] == "selections" && parts[3] == "qr" && r.Method == http.MethodGet {
+		s.handleSelectionQR(w, r, token, parts[2])
+		return
+	}
 
 	writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
 }
@@ -370,6 +381,46 @@ func (s *Server) handleReceiptQR(w http.ResponseWriter, r *http.Request, token s
 	// when the host token was used to ask for it.
 	url := s.shareURL(r, receiptWithItems.Receipt.Token)
 	png, err := qrcode.Encode(url, qrcode.Medium, 256)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "qr_failed"})
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(png)
+}
+
+// handleSelectionQR draws one selection's invoice as a QR code for a wallet
+// to scan. The selection must belong to the receipt named by token.
+func (s *Server) handleSelectionQR(w http.ResponseWriter, r *http.Request, token, selectionIDStr string) {
+	selectionID, err := strconv.ParseInt(selectionIDStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	receiptWithItems, err := s.store.GetReceiptByToken(token)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	selections, err := s.store.ListSelections(receiptWithItems.Receipt.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "selections_fetch_failed"})
+		return
+	}
+	invoice := ""
+	for _, sel := range selections {
+		if sel.ID == selectionID {
+			invoice = sel.Invoice
+			break
+		}
+	}
+	if invoice == "" {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	// Upper case fits QR's alphanumeric mode, which makes a smaller code.
+	png, err := qrcode.Encode(strings.ToUpper("lightning:"+invoice), qrcode.Medium, 320)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "qr_failed"})
 		return
@@ -488,7 +539,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "rate_lookup_failed"})
 		return
 	}
-	lnurl, err := lightning.FetchLNURLPay(r.Context(), receiptWithItems.Receipt.LightningAddress)
+	lnurl, err := fetchLNURLPay(r.Context(), receiptWithItems.Receipt.LightningAddress)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "lnurl_fetch_failed"})
 		return
@@ -508,7 +559,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 	invoiceComment := fmt.Sprintf("SatSplit: %s", participant)
-	invoice, err := lightning.RequestInvoice(r.Context(), lnurl, amountMSat, invoiceComment)
+	invoice, err := requestInvoice(r.Context(), lnurl, amountMSat, invoiceComment)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "invoice_failed"})
 		return
@@ -551,10 +602,13 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 		AlreadyPaidCents: alreadyPaidCents,
 		InvoiceCents:     invoiceCents,
 		EditSecret:       editSecret,
-		AmountMSat:    amountMSat,
-		CurrencyCode:  receiptWithItems.Receipt.CurrencyCode,
-		BTCPrice:      btcPrice,
-		Invoice:       selection.Invoice,
+		AmountMSat:       amountMSat,
+		CurrencyCode:     receiptWithItems.Receipt.CurrencyCode,
+		BTCPrice:         btcPrice,
+		Invoice:          selection.Invoice,
+		// selection is the stored row for this invoice: the new selection,
+		// or the second invoice when adding to a paid one.
+		InvoiceSelectionID: selection.ID,
 	})
 }
 
@@ -1339,6 +1393,10 @@ type selectionResponse struct {
 	InvoiceCents     int64 `json:"invoice_cents"`
 	// EditSecret must be sent back to change this selection later.
 	EditSecret string `json:"edit_secret"`
+	// InvoiceSelectionID is the selection row that holds Invoice. It differs
+	// from SelectionID on a second invoice, where SelectionID stays the paid
+	// selection that lists every item.
+	InvoiceSelectionID int64 `json:"invoice_selection_id"`
 }
 
 type itemsUpdateRequest struct {
@@ -1402,8 +1460,28 @@ func serveStatic(w http.ResponseWriter, r *http.Request) {
 	case "/favicon.ico":
 		w.WriteHeader(http.StatusNoContent)
 	default:
+		if name, ok := strings.CutPrefix(path, "/fonts/"); ok && fontNamePattern.MatchString(name) {
+			serveFont(w, name)
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+// fontNamePattern admits plain file names only, so a request cannot reach
+// outside static/fonts/.
+var fontNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+\.woff2$`)
+
+func serveFont(w http.ResponseWriter, name string) {
+	data, err := readStaticFile("fonts/" + name)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func serveStaticAsset(w http.ResponseWriter, name, contentType string) {
