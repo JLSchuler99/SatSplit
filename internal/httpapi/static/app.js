@@ -78,6 +78,11 @@ const reviewOCR = document.getElementById("review-ocr");
 const reviewOCRWrap = document.getElementById("review-ocr-wrap");
 const reviewPanel = document.getElementById("review-panel");
 const reviewPhotoToggle = document.getElementById("review-photo-toggle");
+const guestReceipt = document.getElementById("guest-receipt");
+const guestReceiptThumb = document.getElementById("guest-receipt-thumb");
+const guestReceiptFull = document.getElementById("guest-receipt-full");
+const guestPhotoPanel = document.getElementById("guest-photo-panel");
+const guestPhotoToggle = document.getElementById("guest-photo-toggle");
 const reviewCount = document.getElementById("review-count");
 const editList = document.getElementById("edit-list");
 const addItemButton = document.getElementById("add-item");
@@ -494,12 +499,27 @@ if (tipPercentInput) {
   tipPercentInput.addEventListener("input", updateReviewTotals);
 }
 
-if (reviewPhotoToggle && reviewPanel) {
-  reviewPhotoToggle.addEventListener("click", () => {
-    const open = reviewPanel.classList.toggle("hidden") === false;
-    reviewPhotoToggle.setAttribute("aria-expanded", String(open));
-    reviewPhotoToggle.textContent = open ? "Hide photo" : "View photo";
+function wirePhotoToggle(toggle, panel) {
+  if (!toggle || !panel) return;
+  toggle.addEventListener("click", () => {
+    const open = panel.classList.toggle("hidden") === false;
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.textContent = open ? "Hide photo" : "View photo";
   });
+}
+
+wirePhotoToggle(reviewPhotoToggle, reviewPanel);
+wirePhotoToggle(guestPhotoToggle, guestPhotoPanel);
+
+// showGuestReceipt lets people paying check the bill against the photo.
+// The card stays hidden unless the photo loads; the server refuses to send
+// guests a photo it cannot clean of location metadata.
+function showGuestReceipt(imageURL) {
+  if (!guestReceipt || !guestReceiptThumb || !imageURL) return;
+  guestReceiptThumb.onload = () => guestReceipt.classList.remove("hidden");
+  guestReceiptThumb.onerror = () => guestReceipt.classList.add("hidden");
+  guestReceiptThumb.src = imageURL;
+  if (guestReceiptFull) guestReceiptFull.src = imageURL;
 }
 
 if (addItemButton) {
@@ -722,6 +742,7 @@ async function loadReceipt(receiptToken) {
     }
     currentBillCents = billCentsOf(payload.items || []);
     receiptSummary.textContent = `Receipt ${payload.receipt_filename} · ${payload.items.length} items`;
+    showGuestReceipt(payload.image_url);
     renderItems(payload.items || []);
     startGuestPolling(receiptToken);
   } catch (err) {
