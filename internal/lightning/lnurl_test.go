@@ -141,35 +141,105 @@ func TestProviderRequestsRefuseNonPublicAddresses(t *testing.T) {
 	}
 }
 
-// A redirect could send the request anywhere, so it is not followed.
-func TestProviderRequestsDoNotFollowRedirects(t *testing.T) {
+// A Lightning address on a custom domain often redirects to the provider
+// that serves it (Alby, LNbits, or apex to www), so https redirects are
+// followed for both the lookup and the callback.
+func TestProviderRequestsFollowHTTPSRedirects(t *testing.T) {
 	allowLoopback(t)
-	var followed atomic.Int32
-	var srv *httptest.Server
-	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var amount string
+	var provider *httptest.Server
+	provider = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/.well-known/lnurlp/alice", "/cb":
-			http.Redirect(w, r, srv.URL+"/elsewhere"+r.URL.Path, http.StatusFound)
+		case "/.well-known/lnurlp/alice":
+			payResponse(w, provider.URL+"/cb")
+		case "/cb":
+			amount = r.URL.Query().Get("amount")
+			invoiceResponse(w)
 		default:
-			followed.Add(1)
-			if strings.HasSuffix(r.URL.Path, "/cb") {
-				invoiceResponse(w)
-				return
-			}
-			payResponse(w, srv.URL+"/cb")
+			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
-	trustServer(t, srv)
+	defer provider.Close()
+	custom := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, provider.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer custom.Close()
+	trustServer(t, provider) // httptest TLS servers share one certificate
 
-	if _, err := FetchLNURLPay(context.Background(), "alice@"+hostOf(srv)); err == nil {
-		t.Error("FetchLNURLPay succeeded through a redirect")
+	lnurl, err := FetchLNURLPay(context.Background(), "alice@"+hostOf(custom))
+	if err != nil {
+		t.Fatalf("FetchLNURLPay through a redirect: %v", err)
 	}
-	lnurl := LNURLPayResponse{Callback: srv.URL + "/cb", MinSendable: 1000, MaxSendable: 1_000_000_000}
-	if _, err := RequestInvoice(context.Background(), lnurl, 5000, ""); err == nil {
-		t.Error("RequestInvoice succeeded through a redirect")
+	lnurl.Callback = custom.URL + "/cb"
+	invoice, err := RequestInvoice(context.Background(), lnurl, 5000, "")
+	if err != nil {
+		t.Fatalf("RequestInvoice through a redirect: %v", err)
 	}
-	if n := followed.Load(); n != 0 {
-		t.Errorf("redirects were followed %d time(s)", n)
+	if invoice.PaymentRequest != "lnbc1testinvoice" || amount != "5000" {
+		t.Errorf("invoice = %+v, amount = %q", invoice, amount)
 	}
+}
+
+// Followed redirects keep the same limits as the first request: https only,
+// a public address on every hop, and a bounded number of hops.
+func TestProviderRedirectsStayHTTPSAndPublic(t *testing.T) {
+	var reached atomic.Int32
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		payResponse(w, "https://pay.example/cb")
+	}))
+	defer target.Close()
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		payResponse(w, "https://pay.example/cb")
+	}))
+	defer plain.Close()
+	var redirectTo string
+	var start *httptest.Server
+	start = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		to := redirectTo
+		if to == "" { // loop back to itself
+			to = start.URL + r.URL.RequestURI()
+		}
+		http.Redirect(w, r, to, http.StatusFound)
+	}))
+	defer start.Close()
+	trustServer(t, start)
+
+	cases := []struct {
+		name    string
+		to      string
+		allow   func(net.IP) bool
+		wantErr string
+	}{
+		// Only the first server may be dialled: the hop to target is refused
+		// the way a hop into a private network would be.
+		{"redirect to a non-public address", target.URL + "/.well-known/lnurlp/alice", firstDialOnly(), "not public"},
+		{"redirect to plain http", plain.URL + "/.well-known/lnurlp/alice", nil, "not https"},
+		{"endless redirects", "", nil, "redirects"},
+	}
+	for _, c := range cases {
+		reached.Store(0)
+		redirectTo = c.to
+		orig := allowAddress
+		allowAddress = func(ip net.IP) bool { return ip.IsLoopback() }
+		if c.allow != nil {
+			allowAddress = c.allow
+		}
+		providerClient.Transport.(*http.Transport).CloseIdleConnections()
+		_, err := FetchLNURLPay(context.Background(), "alice@"+hostOf(start))
+		allowAddress = orig
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: err = %v, want one mentioning %q", c.name, err, c.wantErr)
+		}
+		if n := reached.Load(); n != 0 {
+			t.Errorf("%s: redirect target was reached %d time(s)", c.name, n)
+		}
+	}
+}
+
+// firstDialOnly allows one connection and refuses every later one.
+func firstDialOnly() func(net.IP) bool {
+	var dials atomic.Int32
+	return func(net.IP) bool { return dials.Add(1) == 1 }
 }
