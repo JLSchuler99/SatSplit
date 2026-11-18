@@ -34,11 +34,22 @@ const (
 	maxReceiptSize = 20 << 20 // 20 MB
 )
 
-// The LNURL calls go through these so tests can stand in for a provider.
-var (
-	fetchLNURLPay  = lightning.FetchLNURLPay
-	requestInvoice = lightning.RequestInvoice
-)
+// LNURLService asks the payer's Lightning address provider for an invoice.
+type LNURLService interface {
+	FetchLNURLPay(ctx context.Context, address string) (lightning.LNURLPayResponse, error)
+	RequestInvoice(ctx context.Context, lnurl lightning.LNURLPayResponse, amountMSat int64, comment string) (lightning.Invoice, error)
+}
+
+// liveLNURL is the LNURLService that calls the real provider.
+type liveLNURL struct{}
+
+func (liveLNURL) FetchLNURLPay(ctx context.Context, address string) (lightning.LNURLPayResponse, error) {
+	return lightning.FetchLNURLPay(ctx, address)
+}
+
+func (liveLNURL) RequestInvoice(ctx context.Context, lnurl lightning.LNURLPayResponse, amountMSat int64, comment string) (lightning.Invoice, error) {
+	return lightning.RequestInvoice(ctx, lnurl, amountMSat, comment)
+}
 
 type OCRService interface {
 	Extract(ctx context.Context, imagePath string, req ocr.Request) (ocr.Result, error)
@@ -54,6 +65,8 @@ type Config struct {
 	DefaultOCRLang  string
 	Rates           rates.PriceService
 	Translator      translate.Service
+	// LNURL defaults to the real Lightning address provider when nil.
+	LNURL LNURLService
 	// VisionOCRHint runs Tesseract before the vision pass and gives its text
 	// to the model as a hint. The Tesseract result is never shown or stored
 	// as the item list.
@@ -70,6 +83,7 @@ type Server struct {
 	defaultOCRLang  string
 	rates           rates.PriceService
 	translator      translate.Service
+	lnurl           LNURLService
 	visionOCRHint   bool
 	priceCache      map[string]cachedPrice
 	priceMu         sync.Mutex
@@ -87,6 +101,10 @@ func NewServer(cfg Config) *Server {
 	if uploadDir == "" {
 		uploadDir = "uploads"
 	}
+	lnurl := cfg.LNURL
+	if lnurl == nil {
+		lnurl = liveLNURL{}
+	}
 	return &Server{
 		ocr:             cfg.OCR,
 		vision:          cfg.Vision,
@@ -97,6 +115,7 @@ func NewServer(cfg Config) *Server {
 		defaultOCRLang:  strings.TrimSpace(cfg.DefaultOCRLang),
 		rates:           cfg.Rates,
 		translator:      cfg.Translator,
+		lnurl:           lnurl,
 		visionOCRHint:   cfg.VisionOCRHint,
 		priceCache:      make(map[string]cachedPrice),
 	}
@@ -539,7 +558,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "rate_lookup_failed"})
 		return
 	}
-	lnurl, err := fetchLNURLPay(r.Context(), receiptWithItems.Receipt.LightningAddress)
+	lnurl, err := s.lnurl.FetchLNURLPay(r.Context(), receiptWithItems.Receipt.LightningAddress)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "lnurl_fetch_failed"})
 		return
@@ -559,7 +578,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 	invoiceComment := fmt.Sprintf("SatSplit: %s", participant)
-	invoice, err := requestInvoice(r.Context(), lnurl, amountMSat, invoiceComment)
+	invoice, err := s.lnurl.RequestInvoice(r.Context(), lnurl, amountMSat, invoiceComment)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "invoice_failed"})
 		return

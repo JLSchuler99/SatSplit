@@ -173,11 +173,11 @@ func TestSelectionInvoiceID(t *testing.T) {
 
 	invoices := []string{"lnbc1firstinvoice", "lnbc1secondinvoice"}
 	calls := 0
-	stubLNURL(t, func() string {
+	s.lnurl = stubLNURL{nextInvoice: func() string {
 		inv := invoices[calls]
 		calls++
 		return inv
-	})
+	}}
 
 	first := postSelection(t, s, map[string]any{
 		"participant": "Ana",
@@ -231,16 +231,18 @@ func (r fixedRate) BTCCurrencyPrice(context.Context, string) (float64, error) {
 	return float64(r), nil
 }
 
-func stubLNURL(t *testing.T, nextInvoice func() string) {
-	t.Helper()
-	origFetch, origRequest := fetchLNURLPay, requestInvoice
-	t.Cleanup(func() { fetchLNURLPay, requestInvoice = origFetch, origRequest })
-	fetchLNURLPay = func(context.Context, string) (lightning.LNURLPayResponse, error) {
-		return lightning.LNURLPayResponse{Callback: "https://pay.example/cb", MinSendable: 1000, MaxSendable: 1_000_000_000}, nil
-	}
-	requestInvoice = func(context.Context, lightning.LNURLPayResponse, int64, string) (lightning.Invoice, error) {
-		return lightning.Invoice{PaymentRequest: nextInvoice()}, nil
-	}
+// stubLNURL stands in for a Lightning address provider. Each invoice request
+// returns nextInvoice().
+type stubLNURL struct {
+	nextInvoice func() string
+}
+
+func (stubLNURL) FetchLNURLPay(context.Context, string) (lightning.LNURLPayResponse, error) {
+	return lightning.LNURLPayResponse{Callback: "https://pay.example/cb", MinSendable: 1000, MaxSendable: 1_000_000_000}, nil
+}
+
+func (l stubLNURL) RequestInvoice(context.Context, lightning.LNURLPayResponse, int64, string) (lightning.Invoice, error) {
+	return lightning.Invoice{PaymentRequest: l.nextInvoice()}, nil
 }
 
 func postSelection(t *testing.T, s *Server, body map[string]any) selectionResponse {
