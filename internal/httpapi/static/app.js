@@ -1,3 +1,38 @@
+// storage wraps localStorage. Some browsers refuse storage access outright
+// (blocked cookies, some private modes and in-app browsers) and throw on
+// every call. The page must still work then, so values fall back to memory
+// and last until the page is closed.
+const storage = (() => {
+  const memory = new Map();
+  return {
+    get(key) {
+      try {
+        const value = window.localStorage.getItem(key);
+        if (value !== null) return value;
+      } catch (err) {
+        // Fall through to memory.
+      }
+      return memory.has(key) ? memory.get(key) : null;
+    },
+    set(key, value) {
+      memory.set(key, String(value));
+      try {
+        window.localStorage.setItem(key, value);
+      } catch (err) {
+        // Kept in memory only.
+      }
+    },
+    remove(key) {
+      memory.delete(key);
+      try {
+        window.localStorage.removeItem(key);
+      } catch (err) {
+        // Nothing stored to remove.
+      }
+    },
+  };
+})();
+
 const viewUpload = document.getElementById("view-upload");
 const viewCrop = document.getElementById("view-crop");
 const viewReview = document.getElementById("view-review");
@@ -116,19 +151,19 @@ if (isHistoryPage) {
   setView(viewHistory);
   loadHistory();
 } else if (hostToken) {
-  localStorage.setItem("satsplit_host_token", hostToken);
+  storage.set("satsplit_host_token", hostToken);
   restoreHostSession(hostToken);
 } else if (token) {
   setView(viewJoin);
   loadReceipt(token);
 } else {
-  const savedToken = localStorage.getItem("satsplit_host_token");
+  const savedToken = storage.get("satsplit_host_token");
   if (savedToken) {
     restoreHostSession(savedToken);
   } else {
     setView(viewUpload);
     if (lnInput) {
-      const cached = localStorage.getItem("satsplit_ln_address");
+      const cached = storage.get("satsplit_ln_address");
       if (cached) {
         lnInput.value = cached;
       }
@@ -150,7 +185,7 @@ function setupThemeToggle() {
     const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
     try {
-      localStorage.setItem("satsplit-theme", next);
+      storage.set("satsplit-theme", next);
     } catch (err) {
       // The choice still applies to this page.
     }
@@ -188,7 +223,7 @@ if (uploadForm) {
       return;
     }
     if (lnInput && lnInput.value.trim() !== "") {
-      localStorage.setItem("satsplit_ln_address", lnInput.value.trim());
+      storage.set("satsplit_ln_address", lnInput.value.trim());
     }
 
     pendingUpload = {
@@ -335,7 +370,7 @@ if (cropApply) {
 
 if (selectionForm) {
   const participantInput = selectionForm.querySelector("input[name=participant]");
-  const cachedName = localStorage.getItem("satsplit_participant_name");
+  const cachedName = storage.get("satsplit_participant_name");
   if (cachedName && participantInput) {
     participantInput.value = cachedName;
   }
@@ -349,7 +384,7 @@ if (selectionForm) {
       if (participantInput) participantInput.focus();
       return;
     }
-    localStorage.setItem("satsplit_participant_name", participant);
+    storage.set("satsplit_participant_name", participant);
     const selected = Array.from(itemsContainer.querySelectorAll("input[type=checkbox]:checked"));
     if (selected.length === 0) {
       showError(selectionError, "Select at least one item.");
@@ -363,7 +398,7 @@ if (selectionForm) {
       }
     });
     const storageKey = `satsplit_selection_${token}`;
-    const prev = JSON.parse(localStorage.getItem(storageKey) || "null");
+    const prev = JSON.parse(storage.get(storageKey) || "null");
     const body = { participant, item_ids: itemIds, quantities };
     if (prev && prev.selection_id) {
       body.replace_selection_id = prev.selection_id;
@@ -382,7 +417,7 @@ if (selectionForm) {
         showError(selectionError, payload.error || "Invoice failed");
         return;
       }
-      localStorage.setItem(storageKey, JSON.stringify({
+      storage.set(storageKey, JSON.stringify({
         selection_id: payload.selection_id,
         edit_secret: payload.edit_secret || "",
         item_ids: itemIds,
@@ -486,7 +521,7 @@ if (saveItemsButton) {
 
 if (newUploadButton) {
   newUploadButton.addEventListener("click", () => {
-    localStorage.removeItem("satsplit_host_token");
+    storage.remove("satsplit_host_token");
     window.location.href = "/";
   });
 }
@@ -606,7 +641,7 @@ async function restoreHostSession(savedToken) {
   try {
     const response = await fetch(`/api/receipt/${savedToken}`);
     if (!response.ok) {
-      localStorage.removeItem("satsplit_host_token");
+      storage.remove("satsplit_host_token");
       setView(viewUpload);
       return;
     }
@@ -614,8 +649,8 @@ async function restoreHostSession(savedToken) {
     if (payload.is_host === false) {
       // A guest link opened as a host page: it cannot edit, so show the
       // guest view and stop treating it as a host session.
-      if (localStorage.getItem("satsplit_host_token") === savedToken) {
-        localStorage.removeItem("satsplit_host_token");
+      if (storage.get("satsplit_host_token") === savedToken) {
+        storage.remove("satsplit_host_token");
       }
       forgetHostReceipt(savedToken);
       window.location.replace(`/r/${savedToken}`);
@@ -636,7 +671,7 @@ async function restoreHostSession(savedToken) {
       setView(viewReview);
     }
   } catch (err) {
-    localStorage.removeItem("satsplit_host_token");
+    storage.remove("satsplit_host_token");
     setView(viewUpload);
   }
 }
@@ -711,7 +746,7 @@ function applyPaidStatus(selections) {
 
   // Determine which selection belongs to the current user
   const storageKey = `satsplit_selection_${token}`;
-  const myData = JSON.parse(localStorage.getItem(storageKey) || "null");
+  const myData = JSON.parse(storage.get(storageKey) || "null");
   const mySelectionId = myData ? myData.selection_id : null;
   const myItemIds = myData ? new Set((myData.item_ids || []).map(Number)) : new Set();
 
@@ -1160,7 +1195,7 @@ function renderUploadResult(payload) {
   currentToken = payload.token;
   currentGuestToken = payload.guest_token || payload.token;
   currentCurrency = payload.currency_code || "USD";
-  localStorage.setItem("satsplit_host_token", currentToken);
+  storage.set("satsplit_host_token", currentToken);
   rememberHostReceipt(currentToken);
   showReceipt(payload);
   startUpdatePolling();
@@ -2346,7 +2381,7 @@ function applyTranslations(items) {
 
 function readHostHistory() {
   try {
-    const list = JSON.parse(localStorage.getItem(HOST_HISTORY_KEY) || "[]");
+    const list = JSON.parse(storage.get(HOST_HISTORY_KEY) || "[]");
     return Array.isArray(list) ? list.filter((t) => typeof t === "string" && /^[a-f0-9]{8,64}$/i.test(t)) : [];
   } catch (err) {
     return [];
@@ -2355,7 +2390,7 @@ function readHostHistory() {
 
 function writeHostHistory(list) {
   try {
-    localStorage.setItem(HOST_HISTORY_KEY, JSON.stringify(list.slice(0, HOST_HISTORY_MAX)));
+    storage.set(HOST_HISTORY_KEY, JSON.stringify(list.slice(0, HOST_HISTORY_MAX)));
   } catch (err) {
     // storage unavailable: the page still works, it just forgets
   }
@@ -2575,7 +2610,7 @@ function setupHistory() {
   const startNew = document.getElementById("history-new");
   if (startNew) {
     startNew.addEventListener("click", () => {
-      localStorage.removeItem("satsplit_host_token");
+      storage.remove("satsplit_host_token");
       window.location.href = "/";
     });
   }
