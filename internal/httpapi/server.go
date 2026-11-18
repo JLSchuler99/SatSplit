@@ -560,6 +560,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 	}
 	lnurl, err := s.lnurl.FetchLNURLPay(r.Context(), receiptWithItems.Receipt.LightningAddress)
 	if err != nil {
+		log.Printf("invoice: receipt %d: lightning address lookup failed: %v", receiptWithItems.Receipt.ID, err)
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "lnurl_fetch_failed"})
 		return
 	}
@@ -580,6 +581,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 	invoiceComment := fmt.Sprintf("SatSplit: %s", participant)
 	invoice, err := s.lnurl.RequestInvoice(r.Context(), lnurl, amountMSat, invoiceComment)
 	if err != nil {
+		log.Printf("invoice: receipt %d: provider refused %d msat: %v", receiptWithItems.Receipt.ID, amountMSat, err)
 		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "invoice_failed"})
 		return
 	}
@@ -1172,8 +1174,13 @@ func (s *Server) centsToMilliSats(cents int64, currency string, ctx context.Cont
 	}
 	fiatAmount := float64(cents) / 100.0
 	sats := fiatAmount / price * 100_000_000
-	msat := int64(sats*1000 + 0.5)
-	return msat, price, nil
+	// Invoices are for whole sats. Lightning allows a fraction of a sat, but
+	// some providers (Blink, for one) and some wallets refuse such amounts.
+	wholeSats := int64(sats + 0.5)
+	if wholeSats < 1 {
+		wholeSats = 1
+	}
+	return wholeSats * 1000, price, nil
 }
 
 func (s *Server) cachedBTCPrice(ctx context.Context, currency string) (float64, error) {
