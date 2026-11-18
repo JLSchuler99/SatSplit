@@ -60,6 +60,9 @@ if (ocrLangField) {
 }
 const receiptInput = uploadForm ? uploadForm.querySelector("input[name=receipt]") : null;
 let chosenReceiptFile = null;
+// cropPreviewURL is the blob URL of the photo on the crop page, kept so it
+// can be released when another photo replaces it.
+let cropPreviewURL = null;
 
 const cropper = document.getElementById("cropper");
 const cropImage = document.getElementById("crop-image");
@@ -233,18 +236,43 @@ if (uploadForm) {
       ocrLang: ocrSelect ? ocrSelect.value : "",
     };
 
-    const reader = new FileReader();
-    reader.onload = () => {
+    const showCrop = (src) => {
       if (cropImage) {
         cropRect = null;
         if (cropOverlay) cropOverlay.classList.add("hidden");
-        cropImage.src = reader.result;
+        cropImage.src = src;
       }
       setView(viewCrop);
     };
-    reader.onerror = () => {
+    const cannotOpen = () => {
       showError(uploadResult, "Your browser could not open that photo. Choose it again, or try a different photo.");
     };
+
+    // A blob URL shows the photo without reading it into memory. It is also
+    // the only way on browsers that have no FileReader, such as iPhones in
+    // Lockdown Mode.
+    if (cropPreviewURL) {
+      URL.revokeObjectURL(cropPreviewURL);
+      cropPreviewURL = null;
+    }
+    let previewURL = null;
+    try {
+      previewURL = URL.createObjectURL(pendingUpload.file);
+    } catch (err) {
+      previewURL = null;
+    }
+    if (previewURL) {
+      cropPreviewURL = previewURL;
+      showCrop(previewURL);
+      return;
+    }
+    if (typeof FileReader === "undefined") {
+      cannotOpen();
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => showCrop(reader.result);
+    reader.onerror = cannotOpen;
     reader.readAsDataURL(pendingUpload.file);
   });
 }
