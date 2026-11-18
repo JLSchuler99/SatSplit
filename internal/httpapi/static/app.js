@@ -665,7 +665,7 @@ function nameList(claims) {
     const name = c.mine ? "You" : c.participant;
     counts.set(name, (counts.get(name) || 0) + (c.quantity || 1));
   });
-  return Array.from(counts, ([n, count]) => (count > 1 ? `${n} ×${count}` : n)).join(", ");
+  return Array.from(counts, ([n, count]) => (count > 1 ? `${n} ×${count}` : n)).join(", ");
 }
 
 function setClaimStatus(row, text) {
@@ -1419,15 +1419,21 @@ function updateSharePanel(items) {
     count.className = "share-item-count share-item-status";
     row.appendChild(count);
 
+    // The bar and the names share one line while the names fit beside the
+    // bar; a long list wraps onto its own line below it.
+    const foot = document.createElement("div");
+    foot.className = "share-item-foot";
+
     const progress = document.createElement("div");
     progress.className = "progress progress-thin";
     progress.setAttribute("aria-hidden", "true");
     progress.appendChild(document.createElement("span"));
-    row.appendChild(progress);
+    foot.appendChild(progress);
 
     const names = document.createElement("span");
     names.className = "share-item-names";
-    row.appendChild(names);
+    foot.appendChild(names);
+    row.appendChild(foot);
 
     itemsList.appendChild(row);
   });
@@ -1514,9 +1520,10 @@ function applySelections(selections) {
       if (bar) bar.style.width = `${Math.round((Math.min(assigned.length, slots) / slots) * 100)}%`;
       if (namesEl) {
         // One entry per person, in the order they first claimed: "Ana ×2, Ben".
+        // The no-break space keeps a count on the same line as its name.
         const counts = new Map();
         assigned.forEach((n) => counts.set(n, (counts.get(n) || 0) + 1));
-        namesEl.textContent = Array.from(counts, ([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(", ");
+        namesEl.textContent = Array.from(counts, ([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(", ");
       }
     });
   });
