@@ -242,6 +242,9 @@ if (uploadForm) {
       }
       setView(viewCrop);
     };
+    reader.onerror = () => {
+      showError(uploadResult, "Your browser could not open that photo. Choose it again, or try a different photo.");
+    };
     reader.readAsDataURL(pendingUpload.file);
   });
 }
