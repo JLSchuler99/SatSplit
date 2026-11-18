@@ -78,35 +78,47 @@ func cleanVerifyURL(raw string) string {
 	return parsed.String()
 }
 
-// verifyClient fetches verify URLs, which are chosen by a remote server. It
-// refuses to connect to addresses that are not public, so a provider cannot
-// point the server at something inside its own network, and it does not
-// follow redirects.
-var verifyClient = &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		Proxy: nil,
-		DialContext: (&net.Dialer{
-			Timeout: 4 * time.Second,
-			Control: func(network, address string, _ syscall.RawConn) error {
-				host, _, err := net.SplitHostPort(address)
-				if err != nil {
-					return err
-				}
-				if !isPublicIP(net.ParseIP(host)) {
-					return fmt.Errorf("verify url resolves to a non-public address")
-				}
-				return nil
-			},
-		}).DialContext,
-		TLSHandshakeTimeout: 4 * time.Second,
-		MaxIdleConns:        4,
-		IdleConnTimeout:     30 * time.Second,
-	},
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
+// newPublicClient returns a client for requests whose destination a remote
+// server chose: a Lightning address host, an LNURL callback, or a LUD-21
+// verify URL. It refuses to connect to addresses that are not public, checked
+// on the address actually dialled after DNS resolution, so a provider cannot
+// point the server at something inside its own network. It does not follow
+// redirects, which could lead anywhere.
+func newPublicClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy: nil,
+			DialContext: (&net.Dialer{
+				Timeout: 4 * time.Second,
+				Control: func(network, address string, _ syscall.RawConn) error {
+					host, _, err := net.SplitHostPort(address)
+					if err != nil {
+						return err
+					}
+					if !allowAddress(net.ParseIP(host)) {
+						return fmt.Errorf("destination %s is not public", host)
+					}
+					return nil
+				},
+			}).DialContext,
+			TLSHandshakeTimeout: 4 * time.Second,
+			MaxIdleConns:        4,
+			IdleConnTimeout:     30 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
+
+// verifyClient fetches LUD-21 verify URLs.
+var verifyClient = newPublicClient(5 * time.Second)
+
+// allowAddress decides which dialled addresses a request whose destination a
+// remote server chose may reach. Tests replace it to reach a stand-in
+// provider on this machine.
+var allowAddress = isPublicIP
 
 var carrierNAT = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
@@ -149,6 +161,11 @@ func VerifyPayment(ctx context.Context, verifyURL string) (VerifyResult, error) 
 	return VerifyResult{Settled: payload.Settled, Preimage: strings.TrimSpace(payload.Preimage)}, nil
 }
 
+// providerClient makes the LNURL-pay requests: the lookup of a Lightning
+// address, whose host the uploader typed, and the invoice callback, whose URL
+// that host returned.
+var providerClient = newPublicClient(10 * time.Second)
+
 func ValidateAddressSyntax(address string) bool {
 	return lightningAddressPattern.MatchString(address)
 }
@@ -165,8 +182,7 @@ func FetchLNURLPay(ctx context.Context, address string) (LNURLPayResponse, error
 		return LNURLPayResponse{}, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := providerClient.Do(req)
 	if err != nil {
 		return LNURLPayResponse{}, err
 	}
@@ -194,6 +210,12 @@ func RequestInvoice(ctx context.Context, lnurl LNURLPayResponse, amountMSat int6
 	if err != nil {
 		return Invoice{}, err
 	}
+	// The callback comes from the provider's reply. LNURL (LUD-01) expects
+	// https; its exception for Tor onion services does not apply, since this
+	// server has no route to them.
+	if parsed.Scheme != "https" || parsed.Host == "" {
+		return Invoice{}, errors.New("lnurl callback is not an https url")
+	}
 	q := parsed.Query()
 	q.Set("amount", fmt.Sprintf("%d", amountMSat))
 	if comment != "" && lnurl.CommentAllowed > 0 {
@@ -209,8 +231,7 @@ func RequestInvoice(ctx context.Context, lnurl LNURLPayResponse, amountMSat int6
 		return Invoice{}, err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := providerClient.Do(req)
 	if err != nil {
 		return Invoice{}, err
 	}
