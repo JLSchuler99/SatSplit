@@ -45,6 +45,7 @@
         </span>
         <span class="app-header-end">
           <span id="live-pill" class="live-pill hidden"><span class="live-dot" aria-hidden="true"></span>Live</span>
+          <a id="history-link" class="header-link hidden" href="/history">Your receipts</a>
           <button id="theme-toggle" class="icon-button theme-toggle" type="button" aria-label="Switch to dark theme">
             <svg class="icon icon-moon"><use href="#i-moon" /></svg>
             <svg class="icon icon-sun"><use href="#i-sun" /></svg>
@@ -53,6 +54,28 @@
       </header>
 
       <main class="page">
+        <section id="view-history" class="view hidden" aria-labelledby="history-title">
+          <div class="hero">
+            <h1 id="history-title">Your receipts</h1>
+            <p class="lede">Receipts you uploaded or opened as host in this browser. The list is kept on this device only.</p>
+          </div>
+          <div class="history-actions">
+            <button id="history-new" class="btn btn-primary" type="button"><svg class="icon"><use href="#i-plus" /></svg>New receipt</button>
+            <button id="history-refresh" class="btn btn-secondary" type="button">Refresh</button>
+          </div>
+          <div id="history-list" class="stack" aria-live="polite"></div>
+          <form id="history-add" class="card">
+            <div class="field">
+              <label for="history-add-input">Add a receipt by its host link</label>
+              <div class="copy-row">
+                <input id="history-add-input" class="mono" type="text" placeholder="https://…/h/abc123 or the code" autocomplete="off" autocapitalize="off" spellcheck="false" />
+                <button class="btn btn-copy btn-secondary" type="submit">Add</button>
+              </div>
+            </div>
+            <div id="history-result" class="result hidden" role="alert"></div>
+          </form>
+        </section>
+
         <section id="view-upload" class="view">
           <div class="hero">
             <h1>Split the bill.<br />Settle in sats.</h1>
