@@ -14,26 +14,11 @@ import (
 // image installs it from the libheif-examples package.
 const heifConvertCmd = "heif-convert"
 
-// isHEIC reports whether the file is an HEIF container holding an HEVC image,
-// the default iPhone photo format. It checks the content, not the file name.
+// isHEIC reports whether the file is an HEIF container holding an HEVC image.
+// It checks the content, not the file name.
 func isHEIC(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	head := make([]byte, 12)
-	if _, err := f.Read(head); err != nil {
-		return false
-	}
-	if string(head[4:8]) != "ftyp" {
-		return false
-	}
-	switch string(head[8:12]) {
-	case "heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1":
-		return true
-	}
-	return false
+	kind, ok := sniffImageFile(path)
+	return ok && kind.Ext == ".heic"
 }
 
 // convertHEICToJPEG writes a JPEG next to the HEIC file, removes the original

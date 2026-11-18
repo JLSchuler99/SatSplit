@@ -3,6 +3,7 @@ const viewCrop = document.getElementById("view-crop");
 const viewReview = document.getElementById("view-review");
 const viewShare = document.getElementById("view-share");
 const viewJoin = document.getElementById("view-join");
+const viewHistory = document.getElementById("view-history");
 
 const uploadForm = document.getElementById("upload-form");
 const uploadResult = document.getElementById("upload-result");
@@ -50,6 +51,9 @@ const subtotalEl = document.getElementById("subtotal");
 const receiptSummary = document.getElementById("receipt-summary");
 
 let currentToken = "";
+// The token guests use. The host keeps a separate token for editing; the
+// share link and QR code must carry this one, never the host's.
+let currentGuestToken = "";
 let currentCurrency = "USD";
 let currentTaxCents = 0;
 let currentBillCents = 0;
@@ -70,7 +74,17 @@ const hostToken = window.location.pathname.startsWith("/h/")
   ? window.location.pathname.split("/h/")[1].replace(/\/$/, "")
   : "";
 
-if (hostToken) {
+const isHistoryPage = window.location.pathname === "/history";
+// Declared here, before the first view is chosen, because that code calls
+// the history functions further down.
+const HOST_HISTORY_KEY = "satsplit_host_history";
+const HOST_HISTORY_MAX = 100;
+let historyLoading = false;
+
+if (isHistoryPage) {
+  setView(viewHistory);
+  loadHistory();
+} else if (hostToken) {
   localStorage.setItem("satsplit_host_token", hostToken);
   restoreHostSession(hostToken);
 } else if (token) {
@@ -463,7 +477,19 @@ async function restoreHostSession(savedToken) {
       return;
     }
     const payload = await response.json();
+    if (payload.is_host === false) {
+      // A guest link opened as a host page: it cannot edit, so show the
+      // guest view and stop treating it as a host session.
+      if (localStorage.getItem("satsplit_host_token") === savedToken) {
+        localStorage.removeItem("satsplit_host_token");
+      }
+      forgetHostReceipt(savedToken);
+      window.location.replace(`/r/${savedToken}`);
+      return;
+    }
     currentToken = savedToken;
+    currentGuestToken = payload.guest_token || savedToken;
+    rememberHostReceipt(savedToken);
     currentCurrency = payload.currency_code || "USD";
     const items = payload.items || [];
 
@@ -1019,13 +1045,24 @@ function updateSubtotal() {
     taxEl.textContent = formatCents(tax);
     taxRow.classList.toggle("hidden", currentTaxCents <= 0);
   }
+  // The tip the host set is part of the total, so it gets its own line.
+  const tipRow = document.getElementById("guest-tip-row");
+  const tipEl = document.getElementById("guest-tip");
+  const tipLabel = document.getElementById("guest-tip-label");
+  if (tipRow && tipEl) {
+    tipEl.textContent = formatCents(tip);
+    if (tipLabel) tipLabel.textContent = `Tip (${tipPct}%)`;
+    tipRow.classList.toggle("hidden", tipPct <= 0);
+  }
   if (totalEl) totalEl.textContent = formatCents(food + tax + tip);
 }
 
 function renderUploadResult(payload) {
   currentToken = payload.token;
+  currentGuestToken = payload.guest_token || payload.token;
   currentCurrency = payload.currency_code || "USD";
   localStorage.setItem("satsplit_host_token", currentToken);
+  rememberHostReceipt(currentToken);
   uploadResult.classList.remove("hidden");
   uploadResult.classList.remove("error");
 
@@ -1097,7 +1134,7 @@ function renderSelectionResult(payload) {
 function updateSharePanel(items) {
   if (!sharePanel) return;
   shareItems = items;
-  const shareURL = `${window.location.origin}/r/${currentToken}`;
+  const shareURL = `${window.location.origin}/r/${currentGuestToken || currentToken}`;
 
   sharePanel.textContent = "";
 
@@ -1322,67 +1359,73 @@ function applySelections(selections) {
       detailContainer.appendChild(heading);
     }
     selections.forEach((sel) => {
-      const entry = document.createElement("div");
-      entry.className = "selection-entry";
-
-      const header = document.createElement("div");
-      header.className = "selection-entry-header";
-      const name = document.createElement("span");
-      name.textContent = sel.parent_id ? `${sel.participant} (added items)` : sel.participant;
-      const amount = document.createElement("span");
-      amount.textContent = formatCents(sel.total_cents || 0);
-      header.appendChild(name);
-      header.appendChild(amount);
-      entry.appendChild(header);
-
-      // Paid status comes from the provider (LUD-21). Without it the host
-      // matches the payment hash against their wallet's payment list.
-      const badge = document.createElement("span");
-      badge.className = "selection-status";
-      if (sel.paid) {
-        badge.classList.add("selection-status-paid");
-        badge.textContent = "\u2713 paid";
-      } else if (sel.verifiable) {
-        badge.classList.add("selection-status-unpaid");
-        badge.textContent = "not paid yet";
-      } else {
-        badge.classList.add("selection-status-unknown");
-        badge.textContent = "can\u2019t confirm";
-        badge.title = "This Lightning address provider does not report payments. Match the payment hash in your wallet.";
-      }
-      header.appendChild(badge);
-
-      const meta = document.createElement("div");
-      meta.className = "selection-entry-meta";
-      const addCopy = (text, value) => {
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "invoice-copy-btn";
-        btn.setAttribute("data-copy", value);
-        btn.textContent = text;
-        meta.appendChild(btn);
-      };
-      if (sel.amount_sats > 0) {
-        const sats = document.createElement("span");
-        sats.textContent = `${Number(sel.amount_sats).toLocaleString()} sats`;
-        meta.appendChild(sats);
-      }
-      if (sel.payment_hash) {
-        const hash = document.createElement("span");
-        hash.className = "selection-hash";
-        hash.title = sel.payment_hash;
-        hash.textContent = `hash ${sel.payment_hash.slice(0, 8)}\u2026${sel.payment_hash.slice(-8)}`;
-        meta.appendChild(hash);
-        addCopy("copy hash", sel.payment_hash);
-      }
-      if (sel.preimage) addCopy("copy preimage", sel.preimage);
-      if (sel.invoice) addCopy("copy invoice", sel.invoice);
-      if (meta.childNodes.length > 0) entry.appendChild(meta);
-
-      detailContainer.appendChild(entry);
+      detailContainer.appendChild(buildInvoiceEntry(sel, formatCents));
     });
     wireCopy(detailContainer);
   }
+}
+
+// buildInvoiceEntry draws one person's invoice: name, amount, paid status,
+// and the payment hash to match by hand when the status is not known. money
+// formats an amount in the receipt's currency.
+function buildInvoiceEntry(sel, money) {
+  const entry = document.createElement("div");
+  entry.className = "selection-entry";
+
+  const header = document.createElement("div");
+  header.className = "selection-entry-header";
+  const name = document.createElement("span");
+  name.textContent = sel.parent_id ? `${sel.participant} (added items)` : sel.participant;
+  const amount = document.createElement("span");
+  amount.textContent = money(sel.total_cents || 0);
+  header.appendChild(name);
+  header.appendChild(amount);
+  entry.appendChild(header);
+
+  // Paid status comes from the provider (LUD-21). Without it the host
+  // matches the payment hash against their wallet's payment list.
+  const badge = document.createElement("span");
+  badge.className = "selection-status";
+  if (sel.paid) {
+    badge.classList.add("selection-status-paid");
+    badge.textContent = "\u2713 paid";
+  } else if (sel.verifiable) {
+    badge.classList.add("selection-status-unpaid");
+    badge.textContent = "not paid yet";
+  } else {
+    badge.classList.add("selection-status-unknown");
+    badge.textContent = "can\u2019t confirm";
+    badge.title = "This Lightning address provider does not report payments. Match the payment hash in your wallet.";
+  }
+  header.appendChild(badge);
+
+  const meta = document.createElement("div");
+  meta.className = "selection-entry-meta";
+  const addCopy = (text, value) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "invoice-copy-btn";
+    btn.setAttribute("data-copy", value);
+    btn.textContent = text;
+    meta.appendChild(btn);
+  };
+  if (sel.amount_sats > 0) {
+    const sats = document.createElement("span");
+    sats.textContent = `${Number(sel.amount_sats).toLocaleString()} sats`;
+    meta.appendChild(sats);
+  }
+  if (sel.payment_hash) {
+    const hash = document.createElement("span");
+    hash.className = "selection-hash";
+    hash.title = sel.payment_hash;
+    hash.textContent = `hash ${sel.payment_hash.slice(0, 8)}\u2026${sel.payment_hash.slice(-8)}`;
+    meta.appendChild(hash);
+    addCopy("copy hash", sel.payment_hash);
+  }
+  if (sel.preimage) addCopy("copy preimage", sel.preimage);
+  if (sel.invoice) addCopy("copy invoice", sel.invoice);
+  if (meta.childNodes.length > 0) entry.appendChild(meta);
+  return entry;
 }
 
 function setView(activeView) {
@@ -1394,7 +1437,7 @@ function setView(activeView) {
     clearInterval(updatePollInterval);
     updatePollInterval = null;
   }
-  [viewUpload, viewCrop, viewReview, viewShare, viewJoin].forEach((view) => {
+  [viewUpload, viewCrop, viewReview, viewShare, viewJoin, viewHistory].forEach((view) => {
     if (!view) return;
     if (view === activeView) {
       view.classList.remove("hidden");
@@ -1803,3 +1846,257 @@ function applyTranslations(items) {
     });
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Host history: the receipts this browser uploaded or opened as host. Only
+// the receipt codes are kept, in this browser's storage; everything shown is
+// fetched fresh, so paid status is current each time the page loads.
+
+function readHostHistory() {
+  try {
+    const list = JSON.parse(localStorage.getItem(HOST_HISTORY_KEY) || "[]");
+    return Array.isArray(list) ? list.filter((t) => typeof t === "string" && /^[a-f0-9]{8,64}$/i.test(t)) : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function writeHostHistory(list) {
+  try {
+    localStorage.setItem(HOST_HISTORY_KEY, JSON.stringify(list.slice(0, HOST_HISTORY_MAX)));
+  } catch (err) {
+    // storage unavailable: the page still works, it just forgets
+  }
+  syncHistoryLink();
+}
+
+function rememberHostReceipt(receiptToken) {
+  if (!receiptToken || !/^[a-f0-9]{8,64}$/i.test(receiptToken)) return;
+  const list = readHostHistory().filter((t) => t !== receiptToken);
+  list.unshift(receiptToken);
+  writeHostHistory(list);
+}
+
+function forgetHostReceipt(receiptToken) {
+  writeHostHistory(readHostHistory().filter((t) => t !== receiptToken));
+}
+
+// The link to the history page is shown to hosts only, once there is history.
+function syncHistoryLink() {
+  const link = document.getElementById("history-link");
+  if (!link) return;
+  const show = !token && !isHistoryPage && readHostHistory().length > 0;
+  link.classList.toggle("hidden", !show);
+}
+
+function moneyFormatter(currency) {
+  return (cents) => {
+    const value = (Number(cents) || 0) / 100;
+    try {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(value);
+    } catch (err) {
+      return `${currency || ""} ${value.toFixed(2)}`.trim();
+    }
+  };
+}
+
+async function fetchHistoryEntry(receiptToken) {
+  try {
+    const [receiptRes, selectionsRes] = await Promise.all([
+      fetch(`/api/receipt/${receiptToken}`),
+      fetch(`/api/receipt/${receiptToken}/selections`),
+    ]);
+    if (receiptRes.status === 404) return { token: receiptToken, missing: true };
+    if (!receiptRes.ok) return { token: receiptToken, failed: true };
+    const receipt = await receiptRes.json();
+    const selections = selectionsRes.ok ? (await selectionsRes.json()).selections || [] : [];
+    return { token: receiptToken, receipt, selections };
+  } catch (err) {
+    return { token: receiptToken, failed: true };
+  }
+}
+
+function buildHistoryCard(entry) {
+  const card = document.createElement("div");
+  card.className = "history-card";
+
+  const removeButton = document.createElement("button");
+  removeButton.type = "button";
+  removeButton.className = "invoice-copy-btn";
+  removeButton.textContent = "remove from list";
+  removeButton.addEventListener("click", () => {
+    forgetHostReceipt(entry.token);
+    card.remove();
+    const list = document.getElementById("history-list");
+    if (list && !list.querySelector(".history-card")) showHistoryEmpty(list);
+  });
+
+  if (entry.missing || entry.failed) {
+    const note = document.createElement("p");
+    note.className = "history-note";
+    note.textContent = entry.missing
+      ? `Receipt ${entry.token} no longer exists.`
+      : `Receipt ${entry.token} could not be loaded. Try Refresh.`;
+    card.appendChild(note);
+    card.appendChild(removeButton);
+    return card;
+  }
+
+  const { receipt, selections } = entry;
+  const money = moneyFormatter(receipt.currency_code);
+  const bill = billCentsOf(receipt.items);
+  const tipPercent = Number(receipt.tip_percent) || 0;
+  const tip = tipPercent > 0 ? Math.round((bill * tipPercent) / 100) : 0;
+  const total = bill + (Number(receipt.tax_cents) || 0) + tip;
+  const claimed = selections.reduce((sum, sel) => sum + (sel.total_cents || 0), 0);
+  const paid = selections.filter((sel) => sel.paid);
+  const paidCents = paid.reduce((sum, sel) => sum + (sel.total_cents || 0), 0);
+  const unpaid = selections.filter((sel) => !sel.paid && sel.verifiable).length;
+  const unknown = selections.filter((sel) => !sel.paid && !sel.verifiable).length;
+
+  const head = document.createElement("div");
+  head.className = "history-card-head";
+  const when = document.createElement("strong");
+  const created = new Date(receipt.created_at);
+  when.textContent = isNaN(created)
+    ? "Receipt"
+    : created.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const totalEl = document.createElement("span");
+  totalEl.className = "history-total";
+  totalEl.textContent = money(total);
+  head.appendChild(when);
+  head.appendChild(totalEl);
+  card.appendChild(head);
+
+  const chips = document.createElement("div");
+  chips.className = "history-chips";
+  const addChip = (text, className) => {
+    const chip = document.createElement("span");
+    chip.className = "selection-status" + (className ? " " + className : "");
+    chip.textContent = text;
+    chips.appendChild(chip);
+  };
+  if (selections.length === 0) {
+    addChip("no invoices yet", "selection-status-unknown");
+  } else {
+    if (paid.length > 0) addChip(`\u2713 ${paid.length} paid \u00b7 ${money(paidCents)}`, "selection-status-paid");
+    if (unpaid > 0) addChip(`${unpaid} not paid yet`, "selection-status-unpaid");
+    if (unknown > 0) addChip(`${unknown} can\u2019t confirm`, "selection-status-unknown");
+  }
+  const unclaimed = total - claimed;
+  if (unclaimed > 0) addChip(`${money(unclaimed)} unclaimed`, "selection-status-unpaid");
+  if (selections.length > 0 && unclaimed <= 0) addChip("fully claimed", "selection-status-unknown");
+  card.appendChild(chips);
+
+  if (selections.length > 0) {
+    const details = document.createElement("details");
+    details.className = "history-details";
+    const summary = document.createElement("summary");
+    summary.textContent = `${selections.length} invoice${selections.length === 1 ? "" : "s"}`;
+    details.appendChild(summary);
+    selections.forEach((sel) => details.appendChild(buildInvoiceEntry(sel, money)));
+    wireCopy(details);
+    card.appendChild(details);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "history-card-actions";
+  const open = document.createElement("a");
+  open.href = `/h/${entry.token}`;
+  open.textContent = "Open receipt";
+  actions.appendChild(open);
+  actions.appendChild(removeButton);
+  card.appendChild(actions);
+  return card;
+}
+
+function showHistoryEmpty(list) {
+  list.textContent = "";
+  const empty = document.createElement("p");
+  empty.className = "history-note";
+  empty.textContent = "No receipts yet. Receipts you upload from this browser will appear here.";
+  list.appendChild(empty);
+}
+
+async function loadHistory() {
+  const list = document.getElementById("history-list");
+  if (!list || historyLoading) return;
+  const tokens = readHostHistory();
+  if (tokens.length === 0) {
+    showHistoryEmpty(list);
+    return;
+  }
+  historyLoading = true;
+  const refresh = document.getElementById("history-refresh");
+  if (refresh) refresh.disabled = true;
+  if (!list.querySelector(".history-card")) {
+    list.textContent = "";
+    const loading = document.createElement("p");
+    loading.className = "history-note";
+    loading.textContent = "Loading\u2026";
+    list.appendChild(loading);
+  }
+  try {
+    const entries = await Promise.all(tokens.map(fetchHistoryEntry));
+    // Newest receipt first, whatever order they were added in.
+    entries.sort((a, b) => {
+      const at = a.receipt ? Date.parse(a.receipt.created_at) || 0 : 0;
+      const bt = b.receipt ? Date.parse(b.receipt.created_at) || 0 : 0;
+      return bt - at;
+    });
+    const open = new Set(
+      Array.from(list.querySelectorAll(".history-card[data-token]"))
+        .filter((card) => card.querySelector("details[open]"))
+        .map((card) => card.dataset.token)
+    );
+    list.textContent = "";
+    entries.forEach((entry) => {
+      const card = buildHistoryCard(entry);
+      card.dataset.token = entry.token;
+      if (open.has(entry.token)) {
+        const details = card.querySelector("details");
+        if (details) details.open = true;
+      }
+      list.appendChild(card);
+    });
+  } finally {
+    historyLoading = false;
+    if (refresh) refresh.disabled = false;
+  }
+}
+
+if (isHistoryPage) {
+  const refresh = document.getElementById("history-refresh");
+  if (refresh) refresh.addEventListener("click", loadHistory);
+
+  const addForm = document.getElementById("history-add");
+  const addInput = document.getElementById("history-add-input");
+  const addResult = document.getElementById("history-result");
+  if (addForm && addInput) {
+    addForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearResult(addResult);
+      // Accept a host link, a share link, or the bare code.
+      const match = addInput.value.trim().match(/([a-f0-9]{8,64})\/?$/i);
+      if (!match) {
+        showError(addResult, "That does not look like a receipt link or code.");
+        return;
+      }
+      const entry = await fetchHistoryEntry(match[1].toLowerCase());
+      if (!entry.receipt) {
+        showError(addResult, "No receipt was found for that link.");
+        return;
+      }
+      if (entry.receipt.is_host === false) {
+        showError(addResult, "That is a guest link. Use the host link of a receipt you uploaded.");
+        return;
+      }
+      rememberHostReceipt(entry.token);
+      addInput.value = "";
+      loadHistory();
+    });
+  }
+}
+
+syncHistoryLink();

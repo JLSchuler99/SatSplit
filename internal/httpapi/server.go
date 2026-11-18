@@ -151,14 +151,32 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	token := randomToken()
+	// The guest token goes in the share link. The host token is returned only
+	// to the uploader and is needed to edit the receipt.
+	token, err := randomToken(guestTokenBytes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_save_failed"})
+		return
+	}
+	hostToken, err := randomToken(hostTokenBytes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_save_failed"})
+		return
+	}
 	receiptPath, err := s.persistReceiptToDisk(file, header, token)
+	if errors.Is(err, errNotAnImage) {
+		writeJSON(w, http.StatusBadRequest, errorResponse{
+			Error: "That file is not a photo SatSplit can read. Use a JPEG, PNG, WebP or HEIC image.",
+		})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_save_failed"})
 		return
 	}
 	receipt := store.Receipt{
 		Token:            token,
+		HostToken:        hostToken,
 		LightningAddress: lightningAddress,
 		ReceiptFilename:  header.Filename,
 		ImagePath:        receiptPath,
@@ -242,8 +260,12 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 	status, refining, pending := s.listMeta(receipt, items)
 
 	writeJSON(w, http.StatusOK, receiptResponse{
-		ID:                 receipt.ID,
-		Token:              receipt.Token,
+		ID: receipt.ID,
+		// The uploader is the host, so the token they keep is the host
+		// token. The share link and QR code carry the guest token.
+		Token:              receipt.HostToken,
+		GuestToken:         receipt.Token,
+		IsHost:             true,
 		LightningAddress:   receipt.LightningAddress,
 		ReceiptFilename:    receipt.ReceiptFilename,
 		OCRText:            ocrText,
@@ -316,8 +338,12 @@ func (s *Server) handleReceiptGet(w http.ResponseWriter, r *http.Request, token 
 
 	status, refining, pending := s.listMeta(receiptWithItems.Receipt, receiptWithItems.Items)
 	writeJSON(w, http.StatusOK, receiptDetailResponse{
-		ID:                 receiptWithItems.Receipt.ID,
-		Token:              receiptWithItems.Receipt.Token,
+		ID: receiptWithItems.Receipt.ID,
+		// Token echoes the token the caller presented, so a guest is never
+		// handed the host token.
+		Token:              token,
+		GuestToken:         receiptWithItems.Receipt.Token,
+		IsHost:             isHostToken(receiptWithItems.Receipt, token),
 		LightningAddress:   receiptWithItems.Receipt.LightningAddress,
 		ReceiptFilename:    receiptWithItems.Receipt.ReceiptFilename,
 		OCRText:            receiptWithItems.Receipt.OCRText,
@@ -335,7 +361,14 @@ func (s *Server) handleReceiptGet(w http.ResponseWriter, r *http.Request, token 
 }
 
 func (s *Server) handleReceiptQR(w http.ResponseWriter, r *http.Request, token string) {
-	url := s.shareURL(r, token)
+	receiptWithItems, err := s.store.GetReceiptByToken(token)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	// The QR code is for guests, so it always carries the guest token, also
+	// when the host token was used to ask for it.
+	url := s.shareURL(r, receiptWithItems.Receipt.Token)
 	png, err := qrcode.Encode(url, qrcode.Medium, 256)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "qr_failed"})
@@ -356,7 +389,30 @@ func (s *Server) handleReceiptImage(w http.ResponseWriter, r *http.Request, toke
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
 		return
 	}
-	http.ServeFile(w, r, receiptWithItems.Receipt.ImagePath)
+	f, err := os.Open(receiptWithItems.Receipt.ImagePath)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	defer f.Close()
+	// The stored file is sent only as the image type its content shows, and
+	// never as a document the browser could run on this site's origin.
+	head, err := readHead(f)
+	kind, ok := sniffImage(head)
+	if err != nil || !ok {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	info, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	w.Header().Set("Content-Type", kind.ContentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	w.Header().Set("Content-Disposition", "inline")
+	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
 func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, token string) {
@@ -710,6 +766,12 @@ func (s *Server) handleReceiptItemsUpdate(w http.ResponseWriter, r *http.Request
 	receiptWithItems, err := s.store.GetReceiptByToken(token)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	if !isHostToken(receiptWithItems.Receipt, token) {
+		writeJSON(w, http.StatusForbidden, errorResponse{
+			Error: "Only the person who uploaded this receipt can edit it. Open your host link to make changes.",
+		})
 		return
 	}
 
@@ -1124,17 +1186,29 @@ func tipPercentFromBasis(basisPoints int64) float64 {
 	return float64(basisPoints) / 100
 }
 
+// errNotAnImage is returned for an upload whose content is not a supported
+// image format.
+var errNotAnImage = errors.New("upload is not a supported image")
+
 func (s *Server) persistReceiptToDisk(file multipart.File, header *multipart.FileHeader, token string) (string, error) {
 	if header.Size > maxReceiptSize {
 		return "", errors.New("receipt too large")
 	}
 
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp", ".heic", ".heif":
-	default:
-		ext = ".jpg"
+	// The type comes from the file's content. The name the browser sent is
+	// not used, so a page or script cannot be stored under an image name.
+	head, err := readHead(file)
+	if err != nil {
+		return "", err
 	}
+	kind, ok := sniffImage(head)
+	if !ok {
+		return "", errNotAnImage
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	ext := kind.Ext
 	if err := os.MkdirAll(s.uploadDir, 0o755); err != nil {
 		return "", err
 	}
@@ -1165,10 +1239,28 @@ func (s *Server) persistReceiptToDisk(file multipart.File, header *multipart.Fil
 	return destPath, nil
 }
 
-func randomToken() string {
-	buf := make([]byte, 8)
-	_, _ = rand.Read(buf)
-	return hex.EncodeToString(buf)
+// The guest token is in the share link and its QR code, so it stays short:
+// 64 random bits, as it has always been. The host token is the secret that
+// allows editing and is never in a QR code, so it is 128 bits.
+const (
+	guestTokenBytes = 8
+	hostTokenBytes  = 16
+)
+
+// randomToken returns n random bytes in hex.
+func randomToken(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// isHostToken reports whether token is the receipt's host token. Receipts
+// made before host tokens existed have the same value for both tokens, so
+// their one link still acts as host, as it always did.
+func isHostToken(receipt store.Receipt, token string) bool {
+	return token != "" && subtle.ConstantTimeCompare([]byte(receipt.HostToken), []byte(token)) == 1
 }
 
 type receiptResponse struct {
@@ -1188,6 +1280,8 @@ type receiptResponse struct {
 	Refining           bool         `json:"refining"`
 	PendingTranslation bool         `json:"pending_translation"`
 	OCRConfidence      float64      `json:"ocr_confidence,omitempty"`
+	GuestToken         string       `json:"guest_token"`
+	IsHost             bool         `json:"is_host"`
 }
 
 type receiptDetailResponse struct {
@@ -1206,6 +1300,8 @@ type receiptDetailResponse struct {
 	ItemsStatus        string       `json:"items_status"`
 	Refining           bool         `json:"refining"`
 	PendingTranslation bool         `json:"pending_translation"`
+	GuestToken         string       `json:"guest_token"`
+	IsHost             bool         `json:"is_host"`
 }
 
 type splitRequest struct {
@@ -1274,6 +1370,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func withJSONHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		// Never let a browser guess a different type than the one sent.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1290,7 +1388,7 @@ func (s *Server) staticHandler() http.Handler {
 
 func serveStatic(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
-	if path == "/" || strings.HasPrefix(path, "/r/") || strings.HasPrefix(path, "/h/") {
+	if path == "/" || path == "/history" || strings.HasPrefix(path, "/r/") || strings.HasPrefix(path, "/h/") {
 		serveStaticAsset(w, "index.html", "text/html; charset=utf-8")
 		return
 	}

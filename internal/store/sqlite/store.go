@@ -117,6 +117,18 @@ func migrate(db *sql.DB) error {
 	if err := ensureItemColumn(db, "quantity", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
+	// Host tokens. A receipt created before they existed gets its one shared
+	// token as both values, so links already handed out keep working with no
+	// special case anywhere else.
+	if err := ensureColumn(db, "receipts", "host_token", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE receipts SET host_token = token WHERE host_token = ''`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS receipts_host_token ON receipts(host_token)`); err != nil {
+		return err
+	}
 	for _, col := range [][2]string{
 		{"verify_url", "TEXT NOT NULL DEFAULT ''"},
 		{"amount_sats", "INTEGER NOT NULL DEFAULT 0"},
@@ -149,10 +161,14 @@ func (s *Store) CreateReceipt(receipt store.Receipt) (store.Receipt, error) {
 	if receipt.ItemsStatus == "" {
 		receipt.ItemsStatus = store.ItemsOCR
 	}
+	if receipt.HostToken == "" {
+		receipt.HostToken = receipt.Token
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO receipts (token, lightning_address, receipt_filename, image_path, tip_basis_points, currency_code, ocr_text, items_status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO receipts (token, host_token, lightning_address, receipt_filename, image_path, tip_basis_points, currency_code, ocr_text, items_status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		receipt.Token,
+		receipt.HostToken,
 		receipt.LightningAddress,
 		receipt.ReceiptFilename,
 		receipt.ImagePath,
@@ -341,11 +357,12 @@ func (s *Store) AdjustItemSplitCount(receiptID int64, itemID int64, delta int64)
 func (s *Store) GetReceiptByToken(token string) (store.ReceiptWithItems, error) {
 	var receipt store.Receipt
 	row := s.db.QueryRow(
-		`SELECT id, token, lightning_address, receipt_filename, image_path, tip_basis_points, tax_cents, currency_code, ocr_text, items_status, created_at
-		 FROM receipts WHERE token = ?`,
+		`SELECT id, token, host_token, lightning_address, receipt_filename, image_path, tip_basis_points, tax_cents, currency_code, ocr_text, items_status, created_at
+		 FROM receipts WHERE host_token = ?1 OR token = ?1
+		 ORDER BY (host_token = ?1) DESC LIMIT 1`,
 		token,
 	)
-	if err := row.Scan(&receipt.ID, &receipt.Token, &receipt.LightningAddress, &receipt.ReceiptFilename, &receipt.ImagePath, &receipt.TipBasisPoints, &receipt.TaxCents, &receipt.CurrencyCode, &receipt.OCRText, &receipt.ItemsStatus, &receipt.CreatedAt); err != nil {
+	if err := row.Scan(&receipt.ID, &receipt.Token, &receipt.HostToken, &receipt.LightningAddress, &receipt.ReceiptFilename, &receipt.ImagePath, &receipt.TipBasisPoints, &receipt.TaxCents, &receipt.CurrencyCode, &receipt.OCRText, &receipt.ItemsStatus, &receipt.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return store.ReceiptWithItems{}, err
 		}

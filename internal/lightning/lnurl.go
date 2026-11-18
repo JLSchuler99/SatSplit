@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+// maxLNURLResponse bounds how much of a Lightning address provider's reply
+// is read. The provider is whatever host the uploader typed, so an endless or
+// huge reply must not be read into memory. Real replies are a few kilobytes.
+const maxLNURLResponse = 256 << 10
+
 var invoicePattern = regexp.MustCompile(`(?i)^ln[a-z0-9]+$`)
 
 var lightningAddressPattern = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
@@ -135,7 +140,7 @@ func VerifyPayment(ctx context.Context, verifyURL string) (VerifyResult, error) 
 	defer resp.Body.Close()
 
 	var payload verifyResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&payload); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLNURLResponse)).Decode(&payload); err != nil {
 		return VerifyResult{}, err
 	}
 	if payload.Status == "ERROR" {
@@ -168,7 +173,7 @@ func FetchLNURLPay(ctx context.Context, address string) (LNURLPayResponse, error
 	defer resp.Body.Close()
 
 	var payload LNURLPayResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLNURLResponse)).Decode(&payload); err != nil {
 		return LNURLPayResponse{}, err
 	}
 	if payload.Status == "ERROR" {
@@ -212,7 +217,7 @@ func RequestInvoice(ctx context.Context, lnurl LNURLPayResponse, amountMSat int6
 	defer resp.Body.Close()
 
 	var payload InvoiceResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLNURLResponse)).Decode(&payload); err != nil {
 		return Invoice{}, err
 	}
 	if payload.Status == "ERROR" {

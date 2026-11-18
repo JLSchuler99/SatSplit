@@ -15,7 +15,14 @@ const (
 
 type Receipt struct {
 	ID               int64     `json:"id"`
-	Token            string    `json:"token"`
+	// Token is the guest token, the one in the share link. Anyone who has it
+	// can view the receipt and claim items.
+	Token string `json:"token"`
+	// HostToken is known only to the person who uploaded the receipt. It is
+	// required to edit the items, tax and tip. Receipts made before host
+	// tokens existed have HostToken equal to Token, so their old links keep
+	// working exactly as before. It is never serialised.
+	HostToken        string    `json:"-"`
 	LightningAddress string    `json:"lightning_address"`
 	ReceiptFilename  string    `json:"receipt_filename"`
 	ImagePath        string    `json:"image_path"`
@@ -107,6 +114,8 @@ type Store interface {
 	MarkItemsManual(receiptID int64) error
 	UpdateItemsStatus(receiptID int64, status string) error
 	UpdateItemTranslations(receiptID int64, items []Item) error
+	// GetReceiptByToken finds a receipt by its host token or its guest
+	// token. Compare the token with Receipt.HostToken to tell which it was.
 	GetReceiptByToken(token string) (ReceiptWithItems, error)
 	GetItemsByIDs(receiptID int64, itemIDs []int64) ([]Item, error)
 	AdjustItemSplitCount(receiptID int64, itemID int64, delta int64) error

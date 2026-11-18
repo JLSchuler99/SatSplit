@@ -23,7 +23,8 @@ SQLite database.
    not. Identical lines are merged into one row with a quantity. Without a
    vision model, Tesseract OCR reads the receipt.
 3. **Review.** The host corrects items if needed, sets the tip, and shares the
-   link or QR code.
+   link or QR code. The host keeps a separate host link; only that link can
+   edit the receipt, and the shared guest link cannot.
 4. **Claim.** Each guest selects items. A row with several units lets a guest
    say how many they had, and an item can be split between people. Tax and
    service are shared in proportion to what each person ordered.
@@ -74,6 +75,8 @@ and upload directory on a persistent volume.
 - With a hosted vision model, each receipt photo is sent to that provider.
 - Anyone with a receipt's share link can see its items, who claimed what, and
   the invoices created for it.
+- Uploads are accepted only when their content is a supported image format,
+  and stored photos are served strictly as images.
 
 ## Development
 

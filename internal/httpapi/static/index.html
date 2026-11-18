@@ -12,7 +12,28 @@
       <header class="header">
         <h1>SatSplit</h1>
         <p>Split a shared receipt with a single Lightning address.</p>
+        <a id="history-link" class="history-link hidden" href="/history">Your receipts</a>
       </header>
+
+      <section id="view-history" class="view hidden">
+        <div class="card">
+          <h2>Your receipts</h2>
+          <p class="summary">Receipts you uploaded or opened as host in this browser. The list is kept on this device only.</p>
+          <div class="history-actions">
+            <button id="history-refresh" type="button">Refresh</button>
+            <a class="history-new" href="/">New receipt</a>
+          </div>
+          <div id="history-list"></div>
+          <form id="history-add" class="history-add">
+            <label>
+              Add a receipt by its host link
+              <input id="history-add-input" type="text" placeholder="https://…/h/abc123 or the code" autocomplete="off" />
+            </label>
+            <button type="submit">Add</button>
+          </form>
+          <div id="history-result" class="result hidden"></div>
+        </div>
+      </section>
 
       <section id="view-upload" class="view">
         <div class="card">
@@ -152,6 +173,10 @@
             <div class="total hidden" id="guest-tax-row">
               <span>Tax and service</span>
               <strong id="guest-tax">$0.00</strong>
+            </div>
+            <div class="total hidden" id="guest-tip-row">
+              <span id="guest-tip-label">Tip</span>
+              <strong id="guest-tip">$0.00</strong>
             </div>
             <div class="total">
               <span>Total</span>
