@@ -4,190 +4,262 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SatSplit</title>
+    <script>
+      // Set the theme before first paint so the page never flashes the wrong one.
+      (function () {
+        var theme = null;
+        try {
+          theme = localStorage.getItem("satsplit-theme");
+        } catch (err) {}
+        if (theme !== "light" && theme !== "dark") {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
+    <link rel="preload" href="/fonts/inter-latin-var.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body data-theme="dark">
-    <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle theme">🌙</button>
-    <main class="page">
-      <header class="header">
-        <h1>SatSplit</h1>
-        <p>Split a shared receipt with a single Lightning address.</p>
-        <a id="history-link" class="history-link hidden" href="/history">Your receipts</a>
+  <body>
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" /></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z" /></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" /></symbol>
+      <symbol id="i-camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" /><circle cx="12" cy="13" r="3" /></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21" /></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+      <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" /></symbol>
+      <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6" /></symbol>
+      <symbol id="i-share" viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13" /></symbol>
+    </svg>
+
+    <div class="app">
+      <header id="app-header" class="app-header">
+        <span class="logo">
+          <span class="logo-mark"><svg class="icon"><use href="#i-bolt" /></svg></span>
+          <span class="logo-name">SatSplit</span>
+        </span>
+        <span class="app-header-end">
+          <span id="live-pill" class="live-pill hidden"><span class="live-dot" aria-hidden="true"></span>Live</span>
+          <button id="theme-toggle" class="icon-button theme-toggle" type="button" aria-label="Switch to dark theme">
+            <svg class="icon icon-moon"><use href="#i-moon" /></svg>
+            <svg class="icon icon-sun"><use href="#i-sun" /></svg>
+          </button>
+        </span>
       </header>
 
-      <section id="view-history" class="view hidden">
-        <div class="card">
-          <h2>Your receipts</h2>
-          <p class="summary">Receipts you uploaded or opened as host in this browser. The list is kept on this device only.</p>
-          <div class="history-actions">
-            <button id="history-refresh" type="button">Refresh</button>
-            <a class="history-new" href="/">New receipt</a>
+      <main class="page">
+        <section id="view-upload" class="view">
+          <div class="hero">
+            <h1>Split the bill.<br />Settle in sats.</h1>
+            <p class="lede">Snap the receipt, share a link, and everyone pays their share straight to your Lightning address.</p>
           </div>
-          <div id="history-list"></div>
-          <form id="history-add" class="history-add">
-            <label>
-              Add a receipt by its host link
-              <input id="history-add-input" type="text" placeholder="https://…/h/abc123 or the code" autocomplete="off" />
-            </label>
-            <button type="submit">Add</button>
-          </form>
-          <div id="history-result" class="result hidden"></div>
-        </div>
-      </section>
-
-      <section id="view-upload" class="view">
-        <div class="card">
-          <h2>1. Upload Receipt</h2>
-          <form id="upload-form">
-            <label>
-              Lightning Address
-              <input name="lightning_address" type="text" placeholder="name@domain.com" required />
-            </label>
-            <label>
-              Currency
-              <select name="currency_code">
-                <option value="USD">USD — US Dollar</option>
-                <option value="EUR">EUR — Euro</option>
-                <option value="GBP">GBP — British Pound</option>
-                <option value="MXN">MXN — Mexican Peso</option>
-                <option value="DOP">DOP — Dominican Peso</option>
-                <option value="CAD">CAD — Canadian Dollar</option>
-                <option value="JPY">JPY — Japanese Yen</option>
-                <option value="BRL">BRL — Brazilian Real</option>
-                <option value="CHF">CHF — Swiss Franc</option>
-                <option value="AUD">AUD — Australian Dollar</option>
-                <option value="THB">THB — Thai Baht</option>
-                <option value="COP">COP — Colombian Peso</option>
-                <option value="HUF">HUF — Hungarian Forint</option>
-              </select>
-            </label>
-            <label id="ocr-lang-field" class="hidden">
-              OCR Language
-              <select name="ocr_lang">
-                <option value="">Default</option>
-                <option value="eng">English</option>
-                <option value="spa">Spanish</option>
-                <option value="fra">French</option>
-                <option value="deu">German</option>
-                <option value="hun">Hungarian</option>
-                <option value="por">Portuguese</option>
-                <option value="jpn">Japanese</option>
-                <option value="kor">Korean</option>
-                <option value="chi_sim">Chinese</option>
-                <option value="tha">Thai</option>
-              </select>
-            </label>
-            <div class="receipt-source">
-              <span class="receipt-source-title">Receipt Photo</span>
-              <div class="receipt-source-buttons">
-                <label class="file-button">
-                  Take photo
-                  <input id="receipt-camera" type="file" accept="image/*" capture="environment" hidden />
-                </label>
-                <label class="file-button file-button-secondary">
-                  Choose from gallery
-                  <input name="receipt" type="file" accept="image/*,.heic,.heif" hidden />
-                </label>
+          <div class="card">
+            <form id="upload-form" class="stack">
+              <div class="field">
+                <label for="lightning-address">Your Lightning address</label>
+                <input id="lightning-address" class="mono" name="lightning_address" type="text" placeholder="name@domain.com" autocomplete="off" autocapitalize="off" spellcheck="false" required aria-describedby="lightning-hint" />
+                <p id="lightning-hint" class="hint">Payments go here. SatSplit never holds funds.</p>
               </div>
-              <span id="receipt-chosen" class="receipt-chosen">No photo selected</span>
-            </div>
-            <button type="submit">Continue</button>
-          </form>
-          <div id="upload-result" class="result hidden"></div>
-        </div>
-      </section>
+              <div class="field">
+                <label for="currency-code">Receipt currency</label>
+                <select id="currency-code" name="currency_code">
+                  <option value="USD">USD — US Dollar</option>
+                  <option value="EUR">EUR — Euro</option>
+                  <option value="GBP">GBP — British Pound</option>
+                  <option value="MXN">MXN — Mexican Peso</option>
+                  <option value="DOP">DOP — Dominican Peso</option>
+                  <option value="CAD">CAD — Canadian Dollar</option>
+                  <option value="JPY">JPY — Japanese Yen</option>
+                  <option value="BRL">BRL — Brazilian Real</option>
+                  <option value="CHF">CHF — Swiss Franc</option>
+                  <option value="AUD">AUD — Australian Dollar</option>
+                  <option value="THB">THB — Thai Baht</option>
+                  <option value="COP">COP — Colombian Peso</option>
+                  <option value="HUF">HUF — Hungarian Forint</option>
+                </select>
+              </div>
+              <div id="ocr-lang-field" class="field hidden">
+                <label for="ocr-lang">Receipt language</label>
+                <select id="ocr-lang" name="ocr_lang">
+                  <option value="">Default</option>
+                  <option value="eng">English</option>
+                  <option value="spa">Spanish</option>
+                  <option value="fra">French</option>
+                  <option value="deu">German</option>
+                  <option value="hun">Hungarian</option>
+                  <option value="por">Portuguese</option>
+                  <option value="jpn">Japanese</option>
+                  <option value="kor">Korean</option>
+                  <option value="chi_sim">Chinese</option>
+                  <option value="tha">Thai</option>
+                </select>
+              </div>
+              <div class="field">
+                <span class="field-label" id="receipt-photo-label">Receipt photo</span>
+                <div class="dropzones" role="group" aria-labelledby="receipt-photo-label">
+                  <label class="dropzone">
+                    <svg class="icon icon-lg"><use href="#i-camera" /></svg>
+                    <span>Take photo</span>
+                    <input id="receipt-camera" class="visually-hidden" type="file" accept="image/*" capture="environment" />
+                  </label>
+                  <label class="dropzone">
+                    <svg class="icon icon-lg"><use href="#i-image" /></svg>
+                    <span>From gallery</span>
+                    <input class="visually-hidden" name="receipt" type="file" accept="image/*,.heic,.heif" />
+                  </label>
+                </div>
+                <p id="receipt-chosen" class="receipt-chosen" aria-live="polite">No photo selected</p>
+                <p class="hint">iPhone HEIC photos work too.</p>
+              </div>
+              <button class="btn btn-primary" type="submit">Continue</button>
+            </form>
+            <div id="upload-result" class="result hidden" role="alert"></div>
+          </div>
+          <ol class="steps-strip">
+            <li><span class="mono">01</span>Snap the receipt</li>
+            <li><span class="mono">02</span>Share the link</li>
+            <li><span class="mono">03</span>Friends pay in sats</li>
+          </ol>
+        </section>
 
-      <section id="view-crop" class="view hidden">
-        <div class="card">
-          <h2>2. Crop (Optional)</h2>
-          <p class="summary">Drag to crop the receipt before OCR. Tap “Skip” to use the full image.</p>
-          <div class="cropper" id="cropper">
-            <img id="crop-image" alt="Receipt to crop" />
-            <div id="crop-overlay" class="crop-overlay hidden"></div>
-          </div>
-          <div class="crop-actions">
-            <button id="crop-skip" type="button">Skip Crop</button>
-            <button id="crop-apply" type="button">Crop &amp; Upload</button>
-          </div>
-          <div id="crop-progress" class="crop-progress hidden" role="status" aria-live="polite">
-            <span class="spinner" aria-hidden="true"></span>
-            <span id="crop-progress-text">Uploading…</span>
-          </div>
-          <div id="crop-error" class="result error hidden"></div>
-        </div>
-      </section>
-
-      <section id="view-review" class="view hidden">
-        <div class="card">
-          <h2>3. Review &amp; Edit</h2>
-          <p id="review-status" class="summary"></p>
-          <div id="review-panel" class="review">
-            <div class="review-media">
-              <img id="review-image" alt="Receipt preview" />
+        <section id="view-crop" class="view view-stage hidden" aria-labelledby="crop-title">
+          <header class="screen-header">
+            <button id="crop-back" class="icon-button" type="button" aria-label="Back"><svg class="icon"><use href="#i-back" /></svg></button>
+            <h1 id="crop-title" class="screen-title">Crop receipt</h1>
+            <span class="step-count mono" aria-hidden="true">2/4</span>
+          </header>
+          <div class="crop-stage">
+            <div class="cropper" id="cropper">
+              <img id="crop-image" alt="Receipt to crop" />
+              <div id="crop-overlay" class="crop-overlay hidden">
+                <span class="crop-handle" data-corner="nw"></span>
+                <span class="crop-handle" data-corner="ne"></span>
+                <span class="crop-handle" data-corner="sw"></span>
+                <span class="crop-handle" data-corner="se"></span>
+              </div>
             </div>
-            <div class="review-text">
-              <h3>OCR Text</h3>
+          </div>
+          <div class="crop-footer">
+            <p class="crop-hint">Drag the corners to fit the receipt. A tight crop reads better.</p>
+            <div class="button-pair">
+              <button id="crop-skip" class="btn btn-stage" type="button">Skip crop</button>
+              <button id="crop-apply" class="btn btn-accent" type="button">Crop &amp; read</button>
+            </div>
+            <div id="crop-progress" class="crop-progress hidden" role="status" aria-live="polite">
+              <span class="spinner" aria-hidden="true"></span>
+              <span id="crop-progress-text">Reading items and checking they add up…</span>
+            </div>
+            <div id="crop-error" class="result error hidden" role="alert"></div>
+          </div>
+        </section>
+
+        <section id="view-review" class="view hidden" aria-labelledby="review-title">
+          <header class="screen-header">
+            <span class="screen-header-slot" aria-hidden="true"></span>
+            <h1 id="review-title" class="screen-title">Review items</h1>
+            <span class="step-count mono" aria-hidden="true">3/4</span>
+          </header>
+          <div class="card summary-card">
+            <img id="review-image" class="review-thumb" alt="" />
+            <div class="summary-card-text">
+              <strong>Your receipt</strong>
+              <span id="review-count" class="muted"></span>
+            </div>
+            <button id="review-photo-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="review-panel">View photo</button>
+          </div>
+          <div id="review-panel" class="card review-panel hidden">
+            <img id="review-image-full" alt="Receipt photo" />
+            <div id="review-ocr-wrap" class="hidden">
+              <h2 class="label-heading">Text read from the receipt</h2>
               <pre id="review-ocr"></pre>
             </div>
           </div>
+          <p id="review-status" class="banner hidden" role="status"></p>
           <div id="edit-items">
-            <label>
-              Tip Percentage
-              <input id="tip-percent" type="text" inputmode="decimal" pattern="[0-9]*\.?[0-9]*" placeholder="0" value="0" />
-            </label>
-            <label>
-              Tax and service to split
-              <input id="tax-amount" type="text" inputmode="decimal" pattern="[0-9]*\.?[0-9]*" placeholder="0.00" value="0.00" />
-            </label>
-            <p class="summary">Sales tax, ITBIS, and service charges printed on the receipt. Each person pays the portion that matches what they ordered. Tip stays the percentage above.</p>
-            <div id="edit-list" class="items"></div>
-            <button id="add-item" type="button">Add Item</button>
-            <button id="save-items" type="button">Save &amp; Continue</button>
-            <div id="edit-result" class="result hidden"></div>
+            <div class="section-head">
+              <h2>Items</h2>
+              <span class="hint">Tap a name to edit</span>
+            </div>
+            <div class="card list-card">
+              <div id="edit-list" class="rows"></div>
+              <button id="add-item" class="row-button" type="button"><svg class="icon"><use href="#i-plus" /></svg>Add item</button>
+            </div>
+            <div class="card stack">
+              <fieldset class="field">
+                <legend class="field-label">Tip</legend>
+                <div id="tip-chips" class="chips" role="radiogroup" aria-label="Tip">
+                  <button type="button" class="chip mono" role="radio" data-tip="0">0%</button>
+                  <button type="button" class="chip mono" role="radio" data-tip="10">10%</button>
+                  <button type="button" class="chip mono" role="radio" data-tip="15">15%</button>
+                  <button type="button" class="chip mono" role="radio" data-tip="20">20%</button>
+                  <button type="button" class="chip" role="radio" data-tip="other">Other</button>
+                </div>
+                <div id="tip-other" class="tip-other hidden">
+                  <label for="tip-percent">Tip percentage</label>
+                  <input id="tip-percent" class="mono" type="text" inputmode="decimal" pattern="[0-9]*\.?[0-9]*" placeholder="0" value="0" />
+                </div>
+              </fieldset>
+              <div class="field">
+                <label for="tax-amount">Tax and service on the receipt</label>
+                <input id="tax-amount" class="mono" type="text" inputmode="decimal" pattern="[0-9]*\.?[0-9]*" placeholder="0.00" value="0.00" aria-describedby="tax-hint" />
+                <p id="tax-hint" class="hint">Shared in proportion to what each person ordered.</p>
+              </div>
+              <dl class="breakdown">
+                <div><dt>Subtotal</dt><dd id="review-subtotal" class="mono"></dd></div>
+                <div><dt>Tax and service</dt><dd id="review-tax" class="mono"></dd></div>
+                <div><dt id="review-tip-label">Tip 0%</dt><dd id="review-tip" class="mono"></dd></div>
+                <div class="breakdown-total"><dt>Total</dt><dd id="review-total" class="mono"></dd></div>
+              </dl>
+            </div>
+            <button id="save-items" class="btn btn-primary" type="button">Save &amp; get share link<svg class="icon"><use href="#i-arrow" /></svg></button>
+            <div id="edit-result" class="result hidden" role="alert"></div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <section id="view-share" class="view hidden">
-        <div class="card">
-          <h2>4. Share</h2>
-          <div id="share-panel"></div>
-          <button id="new-upload" type="button">Start New Receipt</button>
-        </div>
-      </section>
+        <section id="view-share" class="view hidden">
+          <div id="share-panel" class="stack-lg"></div>
+          <button id="new-upload" class="btn btn-secondary" type="button">Start a new receipt</button>
+        </section>
 
-      <section id="view-join" class="view hidden">
-        <div class="card">
-          <h2>Choose Your Items</h2>
-          <div id="receipt-summary" class="summary"></div>
-          <form id="selection-form">
-            <label>
-              Your Name
-              <input name="participant" type="text" placeholder="Alex" />
-            </label>
-            <div id="items" class="items"></div>
-            <div class="total">
-              <span>Subtotal</span>
-              <strong id="subtotal">$0.00</strong>
+        <section id="view-join" class="view hidden" aria-labelledby="join-title">
+          <div class="hero hero-tight">
+            <p id="receipt-summary" class="eyebrow"></p>
+            <h1 id="join-title">What did you have?</h1>
+          </div>
+          <form id="selection-form" class="stack">
+            <div class="field">
+              <label for="participant">Your name</label>
+              <input id="participant" name="participant" type="text" placeholder="Alex" autocomplete="given-name" />
             </div>
-            <div class="total hidden" id="guest-tax-row">
-              <span>Tax and service</span>
-              <strong id="guest-tax">$0.00</strong>
+            <div id="items" class="claim-list"></div>
+            <div class="stage-card owe-card">
+              <dl class="breakdown">
+                <div><dt>Your items</dt><dd id="subtotal" class="mono">$0.00</dd></div>
+                <div id="guest-tax-row" class="hidden"><dt>Tax and service share</dt><dd id="guest-tax" class="mono">$0.00</dd></div>
+                <div id="guest-tip-row" class="hidden"><dt id="guest-tip-label">Tip</dt><dd id="guest-tip" class="mono">$0.00</dd></div>
+                <div class="breakdown-hero"><dt>You owe</dt><dd id="guest-total" class="mono">$0.00</dd></div>
+              </dl>
+              <button class="btn btn-accent" type="submit"><svg class="icon"><use href="#i-bolt" /></svg>Pay with Lightning</button>
+              <div id="selection-error" class="result error hidden" role="alert"></div>
             </div>
-            <div class="total hidden" id="guest-tip-row">
-              <span id="guest-tip-label">Tip</span>
-              <strong id="guest-tip">$0.00</strong>
-            </div>
-            <div class="total">
-              <span>Total</span>
-              <strong id="guest-total">$0.00</strong>
-            </div>
-            <button type="submit">Generate Invoice</button>
           </form>
-          <div id="selection-result" class="result hidden"></div>
-        </div>
-      </section>
-    </main>
+        </section>
+
+        <section id="view-pay" class="view hidden" aria-labelledby="pay-title">
+          <header class="screen-header">
+            <button id="pay-back" class="icon-button" type="button" aria-label="Back to items"><svg class="icon"><use href="#i-back" /></svg></button>
+            <h1 id="pay-title" class="screen-title">Your invoice</h1>
+            <span class="screen-header-slot" aria-hidden="true"></span>
+          </header>
+          <div id="selection-result" class="stack"></div>
+        </section>
+      </main>
+    </div>
 
     <script src="/app.js"></script>
   </body>
