@@ -82,9 +82,10 @@ func cleanVerifyURL(raw string) string {
 // server chose: a Lightning address host, an LNURL callback, or a LUD-21
 // verify URL. It refuses to connect to addresses that are not public, checked
 // on the address actually dialled after DNS resolution, so a provider cannot
-// point the server at something inside its own network. It does not follow
-// redirects, which could lead anywhere.
-func newPublicClient(timeout time.Duration) *http.Client {
+// point the server at something inside its own network. The check runs on
+// every connection, so it also covers each redirect hop; checkRedirect
+// decides which redirects are followed at all.
+func newPublicClient(timeout time.Duration, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -106,14 +107,33 @@ func newPublicClient(timeout time.Duration) *http.Client {
 			MaxIdleConns:        4,
 			IdleConnTimeout:     30 * time.Second,
 		},
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+		CheckRedirect: checkRedirect,
 	}
 }
 
+// noRedirects stops at the first response.
+func noRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+// maxProviderRedirects bounds the redirects followed for one LNURL request.
+const maxProviderRedirects = 5
+
+// httpsRedirects follows a bounded number of redirects, each to an https
+// URL. A Lightning address on a custom domain commonly redirects to the
+// provider that serves it, such as Alby or LNbits, or from apex to www.
+func httpsRedirects(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxProviderRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxProviderRedirects)
+	}
+	if req.URL.Scheme != "https" || req.URL.Host == "" {
+		return errors.New("redirect to a url that is not https")
+	}
+	return nil
+}
+
 // verifyClient fetches LUD-21 verify URLs.
-var verifyClient = newPublicClient(5 * time.Second)
+var verifyClient = newPublicClient(5*time.Second, noRedirects)
 
 // allowAddress decides which dialled addresses a request whose destination a
 // remote server chose may reach. Tests replace it to reach a stand-in
@@ -164,7 +184,7 @@ func VerifyPayment(ctx context.Context, verifyURL string) (VerifyResult, error) 
 // providerClient makes the LNURL-pay requests: the lookup of a Lightning
 // address, whose host the uploader typed, and the invoice callback, whose URL
 // that host returned.
-var providerClient = newPublicClient(10 * time.Second)
+var providerClient = newPublicClient(10*time.Second, httpsRedirects)
 
 func ValidateAddressSyntax(address string) bool {
 	return lightningAddressPattern.MatchString(address)
