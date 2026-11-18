@@ -254,6 +254,19 @@
             <p id="receipt-summary" class="eyebrow"></p>
             <h1 id="join-title">What did you have?</h1>
           </div>
+          <div id="guest-receipt" class="stack hidden">
+            <div class="card summary-card">
+              <img id="guest-receipt-thumb" class="review-thumb" alt="" />
+              <div class="summary-card-text">
+                <strong>The receipt</strong>
+                <span class="muted">Check the items and prices</span>
+              </div>
+              <button id="guest-photo-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="guest-photo-panel">View photo</button>
+            </div>
+            <div id="guest-photo-panel" class="card review-panel hidden">
+              <img id="guest-receipt-full" alt="Receipt photo" />
+            </div>
+          </div>
           <form id="selection-form" class="stack">
             <div class="field">
               <label for="participant">Your name</label>

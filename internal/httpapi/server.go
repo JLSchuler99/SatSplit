@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -473,7 +474,26 @@ func (s *Server) handleReceiptImage(w http.ResponseWriter, r *http.Request, toke
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
 		return
 	}
+	// Files are cleaned at upload, but receipts saved before that still
+	// carry their metadata, so it is removed again here. A format that
+	// cannot be cleaned is shown only to the host who uploaded it.
+	if !metadataSafe(kind) && !isHostToken(receiptWithItems.Receipt, token) {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
 	info, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
+		return
+	}
+	_, err = f.Seek(0, io.SeekStart)
+	var data []byte
+	if err == nil {
+		data, err = io.ReadAll(io.LimitReader(f, maxReceiptSize+1))
+	}
+	if err == nil {
+		data, err = stripImageMetadata(data, kind)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not_found"})
 		return
@@ -482,7 +502,7 @@ func (s *Server) handleReceiptImage(w http.ResponseWriter, r *http.Request, toke
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.Header().Set("Content-Disposition", "inline")
-	http.ServeContent(w, r, "", info.ModTime(), f)
+	http.ServeContent(w, r, "", info.ModTime(), bytes.NewReader(data))
 }
 
 func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, token string) {
@@ -1308,6 +1328,14 @@ func (s *Server) persistReceiptToDisk(file multipart.File, header *multipart.Fil
 		}
 		log.Printf("upload: converted HEIC to JPEG for %s", token)
 		destPath = converted
+	}
+	// Guests and the vision model see this file, so the camera's metadata,
+	// GPS position included, is removed before anything reads it. A photo
+	// whose structure cannot be read is refused rather than kept with it.
+	if err := stripImageMetadataFile(destPath); err != nil {
+		log.Printf("upload: could not strip metadata for %s: %v", token, err)
+		_ = os.Remove(destPath)
+		return "", errNotAnImage
 	}
 	return destPath, nil
 }

@@ -188,6 +188,15 @@ func jpegOrientation(data []byte) int {
 	return 1
 }
 
+// EXIFOrientation returns the orientation tag (1-8) in the payload of a JPEG
+// APP1 segment, or 0 when the segment is not EXIF or has no valid tag.
+func EXIFOrientation(app1Payload []byte) int {
+	if o := orientationFromEXIF(app1Payload); o >= 1 && o <= 8 {
+		return o
+	}
+	return 0
+}
+
 func orientationFromEXIF(payload []byte) int {
 	if len(payload) < 8 || !bytes.HasPrefix(payload, []byte("Exif\x00\x00")) {
 		return 0
