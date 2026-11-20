@@ -807,6 +807,11 @@ input::placeholder {
   color: var(--wait-fg);
 }
 
+.banner-error {
+  background: var(--error-bg);
+  color: var(--error-fg);
+}
+
 .pulse-dot {
   width: 12px;
   height: 12px;

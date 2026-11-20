@@ -239,6 +239,9 @@ if (uploadForm) {
       lightning: lnInput ? lnInput.value.trim() : "",
       currency: currencySelect ? currencySelect.value : "USD",
       ocrLang: ocrSelect ? ocrSelect.value : "",
+      // Same id if this photo is submitted again, so a dropped connection
+      // does not create a second receipt.
+      uploadID: newUploadID(),
     };
 
     const showCrop = (src) => {
@@ -448,9 +451,14 @@ if (selectionForm) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const payload = await response.json();
-      if (!response.ok) {
-        showError(selectionError, payload.error || "Invoice failed");
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (err) {
+        payload = null;
+      }
+      if (!response.ok || !payload) {
+        showError(selectionError, serverMessage(payload, "The invoice couldn't be created. Check the Lightning address and try again."));
         return;
       }
       storage.set(storageKey, JSON.stringify({
@@ -463,7 +471,7 @@ if (selectionForm) {
       setView(viewPay);
       fetchGuestSelections(token);
     } catch (err) {
-      showError(selectionError, "Invoice failed");
+      showError(selectionError, "The invoice request didn't finish. Check your connection and try again.");
     } finally {
       if (submitButton) submitButton.disabled = false;
     }
@@ -598,13 +606,7 @@ function setUploadBusy(busy) {
   const started = Date.now();
   const tick = () => {
     const seconds = Math.floor((Date.now() - started) / 1000);
-    if (seconds < 2) {
-      text.textContent = "Uploading…";
-    } else if (seconds < 40) {
-      text.textContent = `Reading items and checking they add up… ${seconds}s`;
-    } else {
-      text.textContent = `Still reading… ${seconds}s. Long receipts take a little longer.`;
-    }
+    text.textContent = seconds < 2 ? "Uploading…" : `Uploading the photo… ${seconds}s`;
   };
   tick();
   uploadBusyTimer = setInterval(tick, 1000);
@@ -616,6 +618,7 @@ async function submitUpload(file, filenameOverride) {
   formData.append("lightning_address", pendingUpload.lightning);
   formData.append("currency_code", pendingUpload.currency || "USD");
   formData.append("ocr_lang", pendingUpload.ocrLang || "");
+  if (pendingUpload.uploadID) formData.append("upload_id", pendingUpload.uploadID);
   const filename = filenameOverride || pendingUpload.file.name || "receipt.jpg";
   formData.append("receipt", file, filename);
 
@@ -626,18 +629,63 @@ async function submitUpload(file, filenameOverride) {
       method: "POST",
       body: formData,
     });
-    const payload = await response.json();
-    if (!response.ok) {
-      showError(cropError, payload.error || "Upload failed");
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (err) {
+      payload = null;
+    }
+    if (!response.ok || !payload || !payload.token) {
+      showError(cropError, uploadFailureMessage(response, payload));
       return;
     }
     renderUploadResult(payload);
     setView(viewReview);
   } catch (err) {
-    showError(cropError, "Upload failed");
+    showError(cropError, uploadDroppedMessage);
   } finally {
     setUploadBusy(false);
   }
+}
+
+// uploadDroppedMessage is shown when the browser never got a response, which
+// is what a proxy timeout used to surface as "Upload failed".
+const uploadDroppedMessage = "The upload didn't finish. The connection dropped, or the server took too long. Check Your receipts before uploading again, so you don't create a second copy.";
+
+function uploadFailureMessage(response, payload) {
+  const sentence = serverMessage(payload, "");
+  if (sentence) return sentence;
+  if (response && (response.status === 408 || response.status === 502 || response.status === 504)) {
+    return uploadDroppedMessage;
+  }
+  if (response && response.status === 413) {
+    return "That photo is too large. Use one under 20 MB.";
+  }
+  if (response && response.status >= 500) {
+    return "Something went wrong saving this receipt. Wait a moment and try again.";
+  }
+  return "The upload didn't finish. Check the photo and your Lightning address, then try again.";
+}
+
+// serverMessage shows a sentence from the API. A machine code, or a body that
+// is not JSON, uses fallback so the page never prints a raw error.
+function serverMessage(payload, fallback) {
+  const msg = payload && typeof payload.error === "string" ? payload.error.trim() : "";
+  if (msg.indexOf(" ") !== -1) return msg;
+  return fallback;
+}
+
+function newUploadID() {
+  if (window.crypto && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (window.crypto && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function getCroppedBlob() {
@@ -2267,6 +2315,8 @@ function setReviewStatus(payload) {
   if (!el || !payload) return;
   el.textContent = "";
   el.className = "banner";
+  el.setAttribute("role", "status");
+  const items = payload.items || [];
   if (payload.refining) {
     el.classList.add("banner-wait");
     const dot = document.createElement("span");
@@ -2274,12 +2324,21 @@ function setReviewStatus(payload) {
     dot.setAttribute("aria-hidden", "true");
     el.appendChild(dot);
     const text = document.createElement("span");
-    text.textContent = "Checking the receipt again for a more accurate item list. You can edit now; saving keeps your version.";
+    text.textContent = items.length === 0
+      ? "Reading the items on your receipt. This usually takes under a minute. Stay on this page — uploading the photo again creates a second receipt."
+      : "Checking the receipt again for a more accurate item list. You can edit now; saving keeps your version.";
     el.appendChild(text);
     return;
   }
-  if ((payload.items || []).length === 0) {
-    el.textContent = "No items detected. Add them below.";
+  if (payload.read_message) {
+    const failed = items.length === 0;
+    el.classList.add(failed ? "banner-error" : "banner-wait");
+    el.setAttribute("role", failed ? "alert" : "status");
+    el.textContent = payload.read_message;
+    return;
+  }
+  if (items.length === 0) {
+    el.textContent = "No items detected. Add them below, or try a clearer, well-lit photo of the whole receipt.";
     return;
   }
   el.classList.add("hidden");

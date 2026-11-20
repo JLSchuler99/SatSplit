@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -118,5 +119,70 @@ func TestReplaceAutoItemsAppliesToDraft(t *testing.T) {
 	}
 	if got.Receipt.ItemsStatus != store.ItemsRefined || got.Items[0].AmountCents != 250 {
 		t.Fatalf("got = %+v %+v", got.Receipt, got.Items)
+	}
+}
+
+func TestUploadIDIsStoredOnce(t *testing.T) {
+	s := testStore(t)
+	const uploadID = "upload-id-12345678"
+	first, err := s.CreateReceipt(store.Receipt{
+		Token: "guest-a", HostToken: "host-a", LightningAddress: "a@pay.example",
+		ReceiptFilename: "r.jpg", CurrencyCode: "USD", UploadID: uploadID, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.CreateReceipt(store.Receipt{
+		Token: "guest-b", HostToken: "host-b", LightningAddress: "a@pay.example",
+		ReceiptFilename: "r.jpg", CurrencyCode: "USD", UploadID: uploadID, CreatedAt: time.Now().UTC(),
+	})
+	if !errors.Is(err, store.ErrUploadExists) {
+		t.Fatalf("second insert err = %v, want ErrUploadExists", err)
+	}
+	got, err := s.GetReceiptByUploadID(uploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Receipt.ID != first.ID || got.Receipt.Token != "guest-a" {
+		t.Fatalf("lookup = %+v", got.Receipt)
+	}
+	// Receipts with no client id still insert independently.
+	if _, err := s.CreateReceipt(store.Receipt{
+		Token: "guest-c", LightningAddress: "a@pay.example", ReceiptFilename: "r.jpg", CurrencyCode: "USD", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateReceipt(store.Receipt{
+		Token: "guest-d", LightningAddress: "a@pay.example", ReceiptFilename: "r.jpg", CurrencyCode: "USD", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetReadStateStopsAfterEdit(t *testing.T) {
+	s := testStore(t)
+	receipt := testReceipt(t, s)
+	if err := s.SetReadState(receipt.ID, "", true, -10000); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetReceiptByToken(receipt.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Receipt.BalanceChecked || got.Receipt.BalanceDiffCents != -10000 {
+		t.Fatalf("balance = checked %v diff %d", got.Receipt.BalanceChecked, got.Receipt.BalanceDiffCents)
+	}
+	if err := s.MarkItemsManual(receipt.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetReadState(receipt.ID, store.ReadNoItems, true, 50); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetReceiptByToken(receipt.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Receipt.ItemsStatus != store.ItemsManual || got.Receipt.ReadIssue != "" || got.Receipt.BalanceChecked || got.Receipt.BalanceDiffCents != 0 {
+		t.Fatalf("after edit: %+v", got.Receipt)
 	}
 }

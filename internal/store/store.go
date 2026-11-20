@@ -1,6 +1,9 @@
 package store
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 const (
 	// ItemsOCR is the fast local parse. A configured vision pass may still replace it.
@@ -11,10 +14,20 @@ const (
 	ItemsFailed = "failed"
 	// ItemsManual means a person edited the list. Automatic replacement must stop.
 	ItemsManual = "manual"
+
+	// ReadNoItems means the photo produced no purchasable lines.
+	ReadNoItems = "no_items"
+	// ReadTimeout means the reader did not finish in time.
+	ReadTimeout = "timeout"
+	// ReadUnavailable means the reader could not be reached.
+	ReadUnavailable = "unavailable"
 )
 
+// ErrUploadExists means this client upload id already has a receipt.
+var ErrUploadExists = errors.New("upload already stored")
+
 type Receipt struct {
-	ID               int64     `json:"id"`
+	ID int64 `json:"id"`
 	// Token is the guest token, the one in the share link. Anyone who has it
 	// can view the receipt and claim items.
 	Token string `json:"token"`
@@ -32,6 +45,17 @@ type Receipt struct {
 	OCRText          string    `json:"ocr_text"`
 	ItemsStatus      string    `json:"items_status"`
 	CreatedAt        time.Time `json:"created_at"`
+	// UploadID is the browser's id for one upload attempt. A retry with the
+	// same id returns this receipt instead of creating another.
+	UploadID string `json:"-"`
+	// ReadIssue is why a vision pass did not produce a usable list.
+	// Empty means the pass saved items, which may still disagree with the
+	// printed total (see BalanceChecked).
+	ReadIssue string `json:"-"`
+	// BalanceChecked is true when the receipt printed a figure to compare.
+	BalanceChecked bool `json:"-"`
+	// BalanceDiffCents is the item sum minus that figure.
+	BalanceDiffCents int64 `json:"-"`
 }
 
 type Item struct {
@@ -49,11 +73,11 @@ type Item struct {
 }
 
 type Selection struct {
-	ID          int64     `json:"id"`
-	ReceiptID   int64     `json:"receipt_id"`
-	Participant string    `json:"participant"`
-	TotalCents  int64     `json:"total_cents"`
-	Invoice     string    `json:"invoice"`
+	ID          int64  `json:"id"`
+	ReceiptID   int64  `json:"receipt_id"`
+	Participant string `json:"participant"`
+	TotalCents  int64  `json:"total_cents"`
+	Invoice     string `json:"invoice"`
 	// ParentID is set on a second invoice: it covers what was added to the
 	// paid selection ParentID, which keeps the full item list.
 	ParentID *int64 `json:"parent_id,omitempty"`
@@ -104,6 +128,11 @@ type ReceiptWithItems struct {
 
 type Store interface {
 	CreateReceipt(receipt Receipt) (Receipt, error)
+	// GetReceiptByUploadID finds the receipt stored for a client upload id.
+	GetReceiptByUploadID(uploadID string) (ReceiptWithItems, error)
+	// SetReadState records the outcome of a vision pass. It does nothing once
+	// a person has edited the list or anyone has claimed an item.
+	SetReadState(receiptID int64, issue string, balanceChecked bool, balanceDiffCents int64) error
 	UpdateReceiptOCR(receiptID int64, ocrText string) error
 	UpdateReceiptTip(receiptID int64, tipBasisPoints int64) error
 	UpdateReceiptTax(receiptID int64, taxCents int64) error

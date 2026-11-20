@@ -2,9 +2,13 @@ package vision
 
 import (
 	"context"
+	"errors"
 
 	"satsplit/internal/store"
 )
+
+// ErrNoItems means the model replied, but no purchasable line could be used.
+var ErrNoItems = errors.New("vision: no valid items extracted")
 
 // Hint is local context for a vision pass. OCRText is a draft transcription;
 // the image still wins when they disagree.
