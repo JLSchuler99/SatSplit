@@ -511,7 +511,7 @@ func parseItems(response, currency string) (Extraction, error) {
 		})
 	}
 	if len(result) == 0 {
-		return Extraction{}, fmt.Errorf("vision: no valid items extracted")
+		return Extraction{}, ErrNoItems
 	}
 	tax := lineTax
 	if fieldTax > 0 {

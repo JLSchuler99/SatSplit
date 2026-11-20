@@ -71,7 +71,11 @@ func migrate(db *sql.DB) error {
 			currency_code TEXT NOT NULL DEFAULT 'USD',
 			ocr_text TEXT NOT NULL DEFAULT '',
 			items_status TEXT NOT NULL DEFAULT 'ocr',
-			created_at TIMESTAMP NOT NULL
+			created_at TIMESTAMP NOT NULL,
+			upload_id TEXT NOT NULL DEFAULT '',
+			read_issue TEXT NOT NULL DEFAULT '',
+			balance_checked INTEGER NOT NULL DEFAULT 0,
+			balance_diff_cents INTEGER NOT NULL DEFAULT 0
 		);`,
 		`CREATE TABLE IF NOT EXISTS items (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,6 +154,23 @@ func migrate(db *sql.DB) error {
 	if err := ensureReceiptColumn(db, "tax_cents", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := ensureReceiptColumn(db, "upload_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureReceiptColumn(db, "read_issue", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureReceiptColumn(db, "balance_checked", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureReceiptColumn(db, "balance_diff_cents", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Empty upload ids are the receipts that predate client upload ids, and
+	// they must not collide with each other.
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS receipts_upload_id ON receipts(upload_id) WHERE upload_id != ''`); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -165,8 +186,8 @@ func (s *Store) CreateReceipt(receipt store.Receipt) (store.Receipt, error) {
 		receipt.HostToken = receipt.Token
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO receipts (token, host_token, lightning_address, receipt_filename, image_path, tip_basis_points, currency_code, ocr_text, items_status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO receipts (token, host_token, lightning_address, receipt_filename, image_path, tip_basis_points, currency_code, ocr_text, items_status, created_at, upload_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		receipt.Token,
 		receipt.HostToken,
 		receipt.LightningAddress,
@@ -177,8 +198,12 @@ func (s *Store) CreateReceipt(receipt store.Receipt) (store.Receipt, error) {
 		receipt.OCRText,
 		receipt.ItemsStatus,
 		now,
+		receipt.UploadID,
 	)
 	if err != nil {
+		if receipt.UploadID != "" && strings.Contains(err.Error(), "UNIQUE") && strings.Contains(err.Error(), "upload_id") {
+			return store.Receipt{}, store.ErrUploadExists
+		}
 		return store.Receipt{}, err
 	}
 	id, err := res.LastInsertId()
@@ -308,7 +333,24 @@ func (s *Store) ReplaceAutoItems(receiptID int64, items []store.Item, status str
 }
 
 func (s *Store) MarkItemsManual(receiptID int64) error {
-	_, err := s.db.Exec(`UPDATE receipts SET items_status = ? WHERE id = ?`, store.ItemsManual, receiptID)
+	_, err := s.db.Exec(
+		`UPDATE receipts SET items_status = ?, read_issue = '', balance_checked = 0, balance_diff_cents = 0 WHERE id = ?`,
+		store.ItemsManual, receiptID,
+	)
+	return err
+}
+
+func (s *Store) SetReadState(receiptID int64, issue string, balanceChecked bool, balanceDiffCents int64) error {
+	checked := 0
+	if balanceChecked {
+		checked = 1
+	}
+	_, err := s.db.Exec(
+		`UPDATE receipts SET read_issue = ?, balance_checked = ?, balance_diff_cents = ?
+		 WHERE id = ? AND items_status = ?
+		   AND NOT EXISTS (SELECT 1 FROM selections WHERE receipt_id = ?)`,
+		issue, checked, balanceDiffCents, receiptID, store.ItemsOCR, receiptID,
+	)
 	return err
 }
 
@@ -354,29 +396,57 @@ func (s *Store) AdjustItemSplitCount(receiptID int64, itemID int64, delta int64)
 	return nil
 }
 
-func (s *Store) GetReceiptByToken(token string) (store.ReceiptWithItems, error) {
-	var receipt store.Receipt
-	row := s.db.QueryRow(
-		`SELECT id, token, host_token, lightning_address, receipt_filename, image_path, tip_basis_points, tax_cents, currency_code, ocr_text, items_status, created_at
-		 FROM receipts WHERE host_token = ?1 OR token = ?1
-		 ORDER BY (host_token = ?1) DESC LIMIT 1`,
-		token,
-	)
-	if err := row.Scan(&receipt.ID, &receipt.Token, &receipt.HostToken, &receipt.LightningAddress, &receipt.ReceiptFilename, &receipt.ImagePath, &receipt.TipBasisPoints, &receipt.TaxCents, &receipt.CurrencyCode, &receipt.OCRText, &receipt.ItemsStatus, &receipt.CreatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return store.ReceiptWithItems{}, err
-		}
-		return store.ReceiptWithItems{}, err
-	}
+const receiptColumns = `id, token, host_token, lightning_address, receipt_filename, image_path, tip_basis_points, tax_cents, currency_code, ocr_text, items_status, created_at, upload_id, read_issue, balance_checked, balance_diff_cents`
 
+func scanReceipt(row *sql.Row) (store.Receipt, error) {
+	var receipt store.Receipt
+	var checked int
+	err := row.Scan(
+		&receipt.ID, &receipt.Token, &receipt.HostToken, &receipt.LightningAddress,
+		&receipt.ReceiptFilename, &receipt.ImagePath, &receipt.TipBasisPoints, &receipt.TaxCents,
+		&receipt.CurrencyCode, &receipt.OCRText, &receipt.ItemsStatus, &receipt.CreatedAt,
+		&receipt.UploadID, &receipt.ReadIssue, &checked, &receipt.BalanceDiffCents,
+	)
+	if err != nil {
+		return store.Receipt{}, err
+	}
+	receipt.BalanceChecked = checked != 0
+	return receipt, nil
+}
+
+func (s *Store) loadReceipt(receipt store.Receipt) (store.ReceiptWithItems, error) {
 	items, err := s.listItems(receipt.ID)
 	if err != nil {
 		return store.ReceiptWithItems{}, err
 	}
-	return store.ReceiptWithItems{
-		Receipt: receipt,
-		Items:   items,
-	}, nil
+	return store.ReceiptWithItems{Receipt: receipt, Items: items}, nil
+}
+
+func (s *Store) GetReceiptByToken(token string) (store.ReceiptWithItems, error) {
+	receipt, err := scanReceipt(s.db.QueryRow(
+		`SELECT `+receiptColumns+`
+		 FROM receipts WHERE host_token = ?1 OR token = ?1
+		 ORDER BY (host_token = ?1) DESC LIMIT 1`,
+		token,
+	))
+	if err != nil {
+		return store.ReceiptWithItems{}, err
+	}
+	return s.loadReceipt(receipt)
+}
+
+func (s *Store) GetReceiptByUploadID(uploadID string) (store.ReceiptWithItems, error) {
+	if uploadID == "" {
+		return store.ReceiptWithItems{}, sql.ErrNoRows
+	}
+	receipt, err := scanReceipt(s.db.QueryRow(
+		`SELECT `+receiptColumns+` FROM receipts WHERE upload_id = ?`,
+		uploadID,
+	))
+	if err != nil {
+		return store.ReceiptWithItems{}, err
+	}
+	return s.loadReceipt(receipt)
 }
 
 func (s *Store) listItems(receiptID int64) ([]store.Item, error) {

@@ -31,9 +31,8 @@ import (
 	"satsplit/internal/vision"
 )
 
-const (
-	maxReceiptSize = 20 << 20 // 20 MB
-)
+// maxReceiptSize is the largest photo accepted. Tests lower it.
+var maxReceiptSize int64 = 20 << 20 // 20 MB
 
 // LNURLService asks the payer's Lightning address provider for an invoice.
 type LNURLService interface {
@@ -91,6 +90,9 @@ type Server struct {
 	archiveMu       sync.Mutex
 	verifyMu        sync.Mutex
 	verifyLast      map[int64]time.Time
+	// readWG tracks vision passes started in the background, so tests can
+	// wait until they have stored a result.
+	readWG sync.WaitGroup
 }
 
 func NewServer(cfg Config) *Server {
@@ -149,56 +151,68 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxReceiptSize+2<<20)
 	if err := r.ParseMultipartForm(maxReceiptSize); err != nil {
 		if errors.Is(err, http.ErrNotMultipart) {
-			writeJSON(w, http.StatusBadRequest, errorResponse{Error: "not_multipart"})
+			writeJSON(w, http.StatusBadRequest, errorResponse{Error: msgIncomplete})
 			return
 		}
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) || errors.Is(err, multipart.ErrMessageTooLarge) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse{Error: "receipt_too_large"})
+			writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse{Error: msgTooLarge})
 			return
 		}
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_multipart_form"})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: msgIncomplete})
 		return
 	}
 
 	lightningAddress := strings.TrimSpace(r.FormValue("lightning_address"))
 	if lightningAddress == "" {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing_lightning_address"})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: msgMissingAddr})
 		return
 	}
 	if !lightning.ValidateAddressSyntax(lightningAddress) {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid_lightning_address"})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: msgBadAddress})
 		return
 	}
 
 	file, header, err := r.FormFile("receipt")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "missing_receipt_file"})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: msgMissingFile})
 		return
 	}
 	defer file.Close()
+
+	// A retry of the same upload, after the connection dropped, returns the
+	// receipt already stored instead of reading the photo a second time.
+	uploadID := cleanUploadID(r.FormValue("upload_id"))
+	if uploadID != "" {
+		if existing, err := s.store.GetReceiptByUploadID(uploadID); err == nil {
+			s.writeHostReceipt(w, r, existing.Receipt, existing.Items, existing.Receipt.OCRText, 0)
+			return
+		}
+	}
 
 	// The guest token goes in the share link. The host token is returned only
 	// to the uploader and is needed to edit the receipt.
 	token, err := randomToken(guestTokenBytes)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_save_failed"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 		return
 	}
 	hostToken, err := randomToken(hostTokenBytes)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_save_failed"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 		return
 	}
 	receiptPath, err := s.persistReceiptToDisk(file, header, token)
 	if errors.Is(err, errNotAnImage) {
-		writeJSON(w, http.StatusBadRequest, errorResponse{
-			Error: "That file is not a photo SatSplit can read. Use a JPEG, PNG, WebP or HEIC image.",
-		})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: msgNotImage})
+		return
+	}
+	if errors.Is(err, errReceiptTooLarge) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, errorResponse{Error: msgTooLarge})
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_save_failed"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 		return
 	}
 	receipt := store.Receipt{
@@ -208,14 +222,25 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 		ReceiptFilename:  header.Filename,
 		ImagePath:        receiptPath,
 		CurrencyCode:     strings.ToUpper(strings.TrimSpace(r.FormValue("currency_code"))),
+		UploadID:         uploadID,
 		CreatedAt:        time.Now().UTC(),
 	}
 	if receipt.CurrencyCode == "" {
 		receipt.CurrencyCode = "USD"
 	}
 	receipt, err = s.store.CreateReceipt(receipt)
+	if errors.Is(err, store.ErrUploadExists) {
+		_ = os.Remove(receiptPath)
+		existing, gerr := s.store.GetReceiptByUploadID(uploadID)
+		if gerr != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
+			return
+		}
+		s.writeHostReceipt(w, r, existing.Receipt, existing.Items, existing.Receipt.OCRText, 0)
+		return
+	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_store_failed"})
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 		return
 	}
 
@@ -232,30 +257,18 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 		ocrConfidence float64
 	)
 	if s.vision != nil {
-		// With a vision model configured it is the only reader of the item
-		// list, so a rough Tesseract draft is never shown or saved.
-		hint := ""
-		if s.visionOCRHint {
-			// Hint only: this text goes to the model and the archive, never
-			// to the item list or the page.
-			if res, err := s.runOCR(r.Context(), receiptPath, ocrLang, receipt.CurrencyCode); err != nil {
-				s.recordArchiveParse(token, "tesseract", "", "", nil, 0, 0, err)
-			} else {
-				s.recordArchiveParse(token, "tesseract", res.Text, res.Stats.Pass, res.Items, res.TaxCents, res.Confidence, nil)
-				hint = res.Text
-			}
-		}
-		items = s.readWithVision(r.Context(), receipt.ID, receipt.Token, receiptPath, receipt.CurrencyCode, hint)
-		if fresh, err := s.store.GetReceiptByToken(receipt.Token); err == nil {
-			receipt = fresh.Receipt
-			items = fresh.Items
-		}
-		go s.translateAndSave(receipt.ID, items, "")
+		// The photo is already stored. Reading it, retries included, can take
+		// longer than a proxy will hold this connection open, which is what
+		// made the page say the upload failed and the person upload the same
+		// photo again. The page polls for the items. The pass keeps its own
+		// deadline, so the connection closing does not cancel it.
+		s.readWG.Add(1)
+		go s.finishVisionRead(receipt.ID, receipt.Token, receiptPath, receipt.CurrencyCode, ocrLang)
 	} else {
 		ocrResult, err := s.runOCR(r.Context(), receiptPath, ocrLang, receipt.CurrencyCode)
 		if err != nil {
 			s.recordArchiveParse(token, "tesseract", "", "", nil, 0, 0, err)
-			writeJSON(w, http.StatusBadGateway, errorResponse{Error: "ocr_failed"})
+			writeJSON(w, http.StatusBadGateway, errorResponse{Error: msgOCRFailed})
 			return
 		}
 		s.recordArchiveParse(token, "tesseract", ocrResult.Text, ocrResult.Stats.Pass, ocrResult.Items, ocrResult.TaxCents, ocrResult.Confidence, nil)
@@ -263,29 +276,32 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 		ocrConfidence = ocrResult.Confidence
 
 		if err := s.store.UpdateReceiptOCR(receipt.ID, ocrResult.Text); err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_store_failed"})
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 			return
 		}
 		if err := s.store.UpdateReceiptTax(receipt.ID, ocrResult.TaxCents); err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_store_failed"})
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 			return
 		}
 		receipt.TaxCents = ocrResult.TaxCents
 
 		items, err = s.store.ReplaceReceiptItems(receipt.ID, ocrResult.Items)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "receipt_store_failed"})
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: msgSaveFailed})
 			return
 		}
 		go s.translateAndSave(receipt.ID, items, ocrLang)
 	}
+	s.writeHostReceipt(w, r, receipt, items, ocrText, ocrConfidence)
+}
+
+// writeHostReceipt is the upload response. Token is the host token; the share
+// link carries the guest token. ReadMessage is set once reading has finished.
+func (s *Server) writeHostReceipt(w http.ResponseWriter, r *http.Request, receipt store.Receipt, items []store.Item, ocrText string, ocrConfidence float64) {
 	if items == nil {
 		items = []store.Item{}
 	}
-
-	shareURL := s.shareURL(r, receipt.Token)
 	status, refining, pending := s.listMeta(receipt, items)
-
 	writeJSON(w, http.StatusOK, receiptResponse{
 		ID: receipt.ID,
 		// The uploader is the host, so the token they keep is the host
@@ -298,7 +314,7 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 		OCRText:            ocrText,
 		CreatedAt:          receipt.CreatedAt,
 		Items:              items,
-		ShareURL:           shareURL,
+		ShareURL:           s.shareURL(r, receipt.Token),
 		ImageURL:           s.imageURL(r, receipt.Token),
 		TipPercent:         tipPercentFromBasis(receipt.TipBasisPoints),
 		TaxCents:           receipt.TaxCents,
@@ -307,6 +323,7 @@ func (s *Server) handleReceiptUpload(w http.ResponseWriter, r *http.Request) {
 		Refining:           refining,
 		PendingTranslation: pending,
 		OCRConfidence:      ocrConfidence,
+		ReadMessage:        readOutcomeMessage(receipt.ReadIssue, receipt.BalanceChecked, receipt.BalanceDiffCents, receipt.CurrencyCode, refining),
 	})
 }
 
@@ -368,13 +385,19 @@ func (s *Server) handleReceiptGet(w http.ResponseWriter, r *http.Request, token 
 	}
 
 	status, refining, pending := s.listMeta(receiptWithItems.Receipt, receiptWithItems.Items)
+	host := isHostToken(receiptWithItems.Receipt, token)
+	readMessage := ""
+	if host {
+		rec := receiptWithItems.Receipt
+		readMessage = readOutcomeMessage(rec.ReadIssue, rec.BalanceChecked, rec.BalanceDiffCents, rec.CurrencyCode, refining)
+	}
 	writeJSON(w, http.StatusOK, receiptDetailResponse{
 		ID: receiptWithItems.Receipt.ID,
 		// Token echoes the token the caller presented, so a guest is never
 		// handed the host token.
 		Token:              token,
 		GuestToken:         receiptWithItems.Receipt.Token,
-		IsHost:             isHostToken(receiptWithItems.Receipt, token),
+		IsHost:             host,
 		LightningAddress:   receiptWithItems.Receipt.LightningAddress,
 		ReceiptFilename:    receiptWithItems.Receipt.ReceiptFilename,
 		OCRText:            receiptWithItems.Receipt.OCRText,
@@ -388,6 +411,7 @@ func (s *Server) handleReceiptGet(w http.ResponseWriter, r *http.Request, token 
 		ItemsStatus:        status,
 		Refining:           refining,
 		PendingTranslation: pending,
+		ReadMessage:        readMessage,
 	})
 }
 
@@ -575,13 +599,13 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 
 	amountMSat, btcPrice, err := s.centsToMilliSats(invoiceCents, receiptWithItems.Receipt.CurrencyCode, r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "rate_lookup_failed"})
+		writeJSON(w, http.StatusBadGateway, errorResponse{Error: msgRateFailed})
 		return
 	}
 	lnurl, err := s.lnurl.FetchLNURLPay(r.Context(), receiptWithItems.Receipt.LightningAddress)
 	if err != nil {
 		log.Printf("invoice: receipt %d: lightning address lookup failed: %v", receiptWithItems.Receipt.ID, err)
-		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "lnurl_fetch_failed"})
+		writeJSON(w, http.StatusBadGateway, errorResponse{Error: lightningLookupMessage(err)})
 		return
 	}
 	if amountMSat > lnurl.MaxSendable {
@@ -602,7 +626,7 @@ func (s *Server) handleSelectionCreate(w http.ResponseWriter, r *http.Request, t
 	invoice, err := s.lnurl.RequestInvoice(r.Context(), lnurl, amountMSat, invoiceComment)
 	if err != nil {
 		log.Printf("invoice: receipt %d: provider refused %d msat: %v", receiptWithItems.Receipt.ID, amountMSat, err)
-		writeJSON(w, http.StatusBadGateway, errorResponse{Error: "invoice_failed"})
+		writeJSON(w, http.StatusBadGateway, errorResponse{Error: msgInvoiceFail})
 		return
 	}
 
@@ -1049,23 +1073,47 @@ func (s *Server) runOCR(ctx context.Context, imagePath, lang, currency string) (
 // visionReadTimeout bounds one upload's vision pass, retries included.
 const visionReadTimeout = 90 * time.Second
 
+// finishVisionRead runs the optional OCR hint and the vision pass off the
+// upload request. The hint text is for the model and the archive only.
+func (s *Server) finishVisionRead(receiptID int64, token, imagePath, currency, ocrLang string) {
+	defer s.readWG.Done()
+	hint := ""
+	if s.visionOCRHint && s.ocr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		res, err := s.runOCR(ctx, imagePath, ocrLang, currency)
+		cancel()
+		if err != nil {
+			s.recordArchiveParse(token, "tesseract", "", "", nil, 0, 0, err)
+		} else {
+			s.recordArchiveParse(token, "tesseract", res.Text, res.Stats.Pass, res.Items, res.TaxCents, res.Confidence, nil)
+			hint = res.Text
+		}
+	}
+	s.readWithVision(receiptID, token, imagePath, currency, hint)
+}
+
 // readWithVision reads the receipt with the vision model and stores the
 // result. On failure the receipt is left with no items and marked failed, so
-// the host can enter them by hand; no other reader is tried.
-func (s *Server) readWithVision(parent context.Context, receiptID int64, token, imagePath, currency, ocrHint string) []store.Item {
+// the host can enter them by hand; no other reader is tried. Items that were
+// read but do not add up to the printed total are kept, with the difference
+// recorded, so the host can correct them.
+func (s *Server) readWithVision(receiptID int64, token, imagePath, currency, ocrHint string) {
 	log.Printf("vision: starting for receipt %d", receiptID)
-	ctx, cancel := context.WithTimeout(parent, visionReadTimeout)
+	// Detached from the upload request: a proxy or the browser giving up
+	// must not cancel the retries and discard a receipt the page can still show.
+	ctx, cancel := context.WithTimeout(context.Background(), visionReadTimeout)
 	defer cancel()
 
 	extracted, err := s.vision.ExtractItems(ctx, imagePath, vision.Hint{Currency: currency, OCRText: ocrHint})
 	s.recordArchiveVision(token, extracted, err)
 	logVisionAttempts(receiptID, extracted)
-	if err != nil {
-		log.Printf("vision: failed for receipt %d: %v", receiptID, err)
-		if statusErr := s.store.UpdateItemsStatus(receiptID, store.ItemsFailed); statusErr != nil {
-			log.Printf("vision: status update failed for receipt %d: %v", receiptID, statusErr)
+	if err != nil || len(extracted.Items) == 0 {
+		if err == nil {
+			err = vision.ErrNoItems
 		}
-		return nil
+		log.Printf("vision: failed for receipt %d: %v", receiptID, err)
+		s.failRead(receiptID, classifyVisionErr(err))
+		return
 	}
 	// The archive keeps the lines as the model read them. The receipt gets
 	// identical lines folded into one row with a quantity.
@@ -1073,19 +1121,45 @@ func (s *Server) readWithVision(parent context.Context, receiptID int64, token, 
 	if len(items) != len(extracted.Items) {
 		log.Printf("vision: receipt %d merged %d printed lines into %d rows", receiptID, len(extracted.Items), len(items))
 	}
-	saved, err := s.store.ReplaceReceiptItems(receiptID, items)
+	if len(items) == 0 {
+		log.Printf("vision: failed for receipt %d: %v", receiptID, vision.ErrNoItems)
+		s.failRead(receiptID, store.ReadNoItems)
+		return
+	}
+	if err := s.store.SetReadState(receiptID, "", extracted.Verifiable, extracted.DiffCents); err != nil {
+		log.Printf("vision: read state failed for receipt %d: %v", receiptID, err)
+	}
+	// Replace only while nobody has edited or claimed the list. The page
+	// invites the host to type items while this pass is still running.
+	replaced, saved, err := s.store.ReplaceAutoItems(receiptID, items, store.ItemsRefined)
 	if err != nil {
 		log.Printf("vision: save failed for receipt %d: %v", receiptID, err)
-		return nil
+		s.failRead(receiptID, store.ReadUnavailable)
+		return
+	}
+	if !replaced {
+		log.Printf("vision: receipt %d left unchanged; the list was edited or a payment was started", receiptID)
+		return
 	}
 	if err := s.store.UpdateReceiptTax(receiptID, extracted.TaxCents); err != nil {
 		log.Printf("vision: tax update failed for receipt %d: %v", receiptID, err)
 	}
-	if err := s.store.UpdateItemsStatus(receiptID, store.ItemsRefined); err != nil {
+	log.Printf("vision: read %d items for receipt %d", len(saved), receiptID)
+	go s.translateAndSave(receiptID, saved, "")
+}
+
+// failRead marks the receipt failed and records a coarse reason the page
+// can turn into a sentence. The detailed error is logged by the caller.
+func (s *Server) failRead(receiptID int64, issue string) {
+	if issue == "" {
+		issue = store.ReadUnavailable
+	}
+	if err := s.store.SetReadState(receiptID, issue, false, 0); err != nil {
+		log.Printf("vision: read state failed for receipt %d: %v", receiptID, err)
+	}
+	if err := s.store.UpdateItemsStatus(receiptID, store.ItemsFailed); err != nil {
 		log.Printf("vision: status update failed for receipt %d: %v", receiptID, err)
 	}
-	log.Printf("vision: read %d items for receipt %d", len(saved), receiptID)
-	return saved
 }
 
 // logVisionAttempts writes one line per model round and a verdict on whether
@@ -1290,9 +1364,12 @@ func tipPercentFromBasis(basisPoints int64) float64 {
 // image format.
 var errNotAnImage = errors.New("upload is not a supported image")
 
+// errReceiptTooLarge is returned when the photo exceeds maxReceiptSize.
+var errReceiptTooLarge = errors.New("receipt too large")
+
 func (s *Server) persistReceiptToDisk(file multipart.File, header *multipart.FileHeader, token string) (string, error) {
 	if header.Size > maxReceiptSize {
-		return "", errors.New("receipt too large")
+		return "", errReceiptTooLarge
 	}
 
 	// The type comes from the file's content. The name the browser sent is
@@ -1390,6 +1467,9 @@ type receiptResponse struct {
 	OCRConfidence      float64      `json:"ocr_confidence,omitempty"`
 	GuestToken         string       `json:"guest_token"`
 	IsHost             bool         `json:"is_host"`
+	// ReadMessage tells the host what to do when the items could not be read
+	// or do not add up to the printed total. Empty when there is nothing to do.
+	ReadMessage string `json:"read_message,omitempty"`
 }
 
 type receiptDetailResponse struct {
@@ -1410,6 +1490,7 @@ type receiptDetailResponse struct {
 	PendingTranslation bool         `json:"pending_translation"`
 	GuestToken         string       `json:"guest_token"`
 	IsHost             bool         `json:"is_host"`
+	ReadMessage        string       `json:"read_message,omitempty"`
 }
 
 type splitRequest struct {
